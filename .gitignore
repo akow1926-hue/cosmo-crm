@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+package-lock.json.bak
+
+# Database & SQLite files
+barokot.db
+barokot.db-journal
+barokot.db-wal
+barokot.db-shm
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Environment & credentials
+.env
+.env.local
+
+# Operating System & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Mobile Builds
+android/
+*.apk
+BarokotCRM.apk
+
+# Uploads
+public/uploads/**
+!public/uploads/
+!public/uploads/**/
+!public/uploads/**/.gitkeep
+
+.vercel
