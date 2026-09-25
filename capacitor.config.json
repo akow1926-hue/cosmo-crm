@@ -3,7 +3,7 @@
   "appName": "Cosmo CRM",
   "webDir": "public",
   "server": {
-    "url": "https://cosmo-crm.vercel.app",
+    "url": "https://crmcosmo.company",
     "cleartext": true
   },
   "android": {

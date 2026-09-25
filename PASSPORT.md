@@ -20,7 +20,7 @@
   * **Light Ice Mint (`#E2F4F0` / `#EBF5F3`)** — мягкий шелковистый фон без усталости глаз
 * **Базовая валюта:** Узбекский сум (**UZS**).
 * **Текущая версия:** `2.7.0 (Cosmo Design & Google Sheets Live Edition)`.
-* **Облачный адрес (Vercel Production):** `https://cosmo-crm.vercel.app`
+* **Облачный адрес (Vercel Production):** `https://crmcosmo.company` (также доступен `https://cosmo-crm.vercel.app`)
 * **Локальный адрес:** `http://localhost:3000` (В локальной сети Wi-Fi для смартфонов: `http://<local-ip>:3000`).
 * **Облачное хранилище бэкапов:** Google Таблицы через двухсторонний Google Apps Script Webhook.
 
