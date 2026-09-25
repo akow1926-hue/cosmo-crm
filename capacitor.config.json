@@ -3,7 +3,7 @@
   "appName": "Cosmo CRM",
   "webDir": "public",
   "server": {
-    "url": "https://barokot-crm.vercel.app",
+    "url": "https://cosmo-crm.vercel.app",
     "cleartext": true
   },
   "android": {
