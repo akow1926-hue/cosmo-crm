@@ -1,7 +1,16 @@
+/**
+ * Google Apps Script Webhook — Barokot CRM & Cosmo Cleaning Multi-Brand Integration
+ * 
+ * Автоматически разделяет заказы по вкладкам:
+ * - Вкладка "Barokot" (заказы BRK-XXXX от бренда Barokot)
+ * - Вкладка "Cosmo" (заказы CSM-XXXX от бренда Cosmo Cleaning)
+ * 
+ * Если вкладка не существует, скрипт автоматически создает её с фирменным стилем!
+ */
+
 function doPost(e) {
   try {
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-    setupHeaders(sheet);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
 
     if (!e || !e.postData || !e.postData.contents) {
       return respondJson({ error: 'No payload received' }, 400);
@@ -12,6 +21,8 @@ function doPost(e) {
 
     if (action === 'batch_sync' && Array.isArray(payload.orders)) {
       payload.orders.forEach(function(o) {
+        const sheet = getTargetSheet(ss, payload, o);
+        setupHeaders(sheet, sheet.getName());
         upsertOrderRow(sheet, o);
       });
       return respondJson({ success: true, count: payload.orders.length });
@@ -22,20 +33,39 @@ function doPost(e) {
       return respondJson({ error: 'Order ID is required' }, 400);
     }
 
+    const sheet = getTargetSheet(ss, payload, order);
+    setupHeaders(sheet, sheet.getName());
+
     if (action === 'delete') {
       deleteOrderRow(sheet, order.id, order.delete_reason);
     } else {
       upsertOrderRow(sheet, order);
     }
 
-    return respondJson({ success: true, id: order.id, action: action });
+    return respondJson({ success: true, id: order.id, action: action, sheet: sheet.getName() });
   } catch (err) {
     return respondJson({ error: err.toString() }, 500);
   }
 }
 
 function doGet(e) {
-  return respondJson({ status: 'active', app: 'BAROKOT CRM Google Sheets Integration', timestamp: new Date().toISOString() });
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheets = ss.getSheets().map(function(s) { return s.getName(); });
+    return respondJson({
+      status: 'active',
+      app: 'Barokot & Cosmo CRM Multi-Brand Google Sheets Integration',
+      sheets: sheets,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    return respondJson({
+      status: 'active',
+      app: 'Barokot & Cosmo CRM Multi-Brand Google Sheets Integration',
+      error: err.toString(),
+      timestamp: new Date().toISOString()
+    });
+  }
 }
 
 function respondJson(obj, status) {
@@ -43,29 +73,61 @@ function respondJson(obj, status) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function setupHeaders(sheet) {
+/**
+ * Определяет или создает целевую вкладку (Barokot / Cosmo)
+ */
+function getTargetSheet(ss, payload, order) {
+  let sheetName = (payload && payload.sheet_name) || (order && order.sheet_name);
+  if (!sheetName) {
+    const brand = String((payload && payload.brand) || (order && order.brand) || '').toUpperCase();
+    const orderId = String((order && order.id) || '').toUpperCase();
+    if (brand.includes('COSMO') || orderId.startsWith('CSM-')) {
+      sheetName = 'Cosmo';
+    } else {
+      sheetName = 'Barokot';
+    }
+  }
+
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    setupHeaders(sheet, sheetName);
+  }
+  return sheet;
+}
+
+function setupHeaders(sheet, sheetName) {
   if (sheet.getLastRow() === 0) {
     const headers = [
-      'ID \u0417\u0430\u043a\u0430\u0437\u0430',
-      '\u0414\u0430\u0442\u0430 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f',
-      '\u041a\u043b\u0438\u0435\u043d\u0442',
-      '\u0422\u0435\u043b\u0435\u0444\u043e\u043d',
-      '\u0410\u0434\u0440\u0435\u0441',
-      '\u0420\u0430\u0439\u043e\u043d',
-      '\u0421\u0442\u0430\u0442\u0443\u0441 \u0437\u0430\u043a\u0430\u0437\u0430',
-      '\u043c\u00b2',
-      '\u0421\u0443\u043c\u043c\u0430 (\u0441\u0443\u043c)',
-      '\u041e\u043f\u043b\u0430\u0447\u0435\u043d\u043e (\u0441\u0443\u043c)',
-      '\u0421\u043f\u043e\u0441\u043e\u0431 \u043e\u043f\u043b\u0430\u0442\u044b',
-      '\u041a\u0443\u0440\u044c\u0435\u0440 / \u042d\u043a\u0438\u043f\u0430\u0436',
-      '\u041c\u0430\u0441\u0442\u0435\u0440 \u0446\u0435\u0445\u0430',
-      '\u0414\u0430\u0442\u0430 \u0434\u043e\u0441\u0442\u0430\u0432\u043a\u0438',
-      '\u041f\u0440\u0438\u043c\u0435\u0447\u0430\u043d\u0438\u0435 \u0434\u0438\u0441\u043f\u0435\u0442\u0447\u0435\u0440\u0430'
+      'ID Заказа',
+      'Дата создания',
+      'Клиент',
+      'Телефон',
+      'Адрес',
+      'Район',
+      'Статус заказа',
+      'м²',
+      'Сумма (сум)',
+      'Оплачено (сум)',
+      'Способ оплаты',
+      'Курьер / Экипаж',
+      'Мастер цеха',
+      'Дата доставки',
+      'Примечание диспетчера'
     ];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
-    headerRange.setBackground('#013E37');
-    headerRange.setFontColor('#FFEFB3');
+    
+    // Брендовый стиль шапки таблицы
+    const isCosmo = String(sheetName || '').toLowerCase().includes('cosmo');
+    if (isCosmo) {
+      headerRange.setBackground('#0369A1'); // Oceanic Blue
+      headerRange.setFontColor('#FFFFFF');
+    } else {
+      headerRange.setBackground('#013E37'); // Barokot Deep Emerald
+      headerRange.setFontColor('#FFEFB3'); // Gold
+    }
+    
     headerRange.setFontWeight('bold');
     headerRange.setHorizontalAlignment('center');
     sheet.setFrozenRows(1);

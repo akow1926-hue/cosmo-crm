@@ -771,7 +771,8 @@ async function syncOrdersFromGoogleSheets(force = false) {
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       const id = String(r[0] || '').trim();
-      if (!id || id === 'BRK-TEST') continue;
+      // Строгая фильтрация брендов: Cosmo CRM импортирует только заказы Cosmo (игнорирует Barokot 'BRK-', legacy 4-значные и тесты)
+      if (!id || id === 'CSM-TEST' || id === 'BRK-TEST' || id.startsWith('BRK-') || /^\d{4}$/.test(id)) continue;
 
       const stageRaw = String(r[6] || '').trim();
       const isDeleted = stageRaw.includes('[УДАЛЕН]') ? 1 : 0;
@@ -833,6 +834,8 @@ async function syncOrderToGoogleSheets(order, action = 'upsert') {
 
     const payloadOrder = {
       ...order,
+      brand: 'COSMO',
+      sheet_name: 'Cosmo',
       client_phone: order.client_phone ? ("'" + String(order.client_phone).replace(/^'/, '')) : '',
       stage_ru: STAGE_LABELS_RU[order.stage] || order.stage || 'Принят'
     };
@@ -842,6 +845,8 @@ async function syncOrderToGoogleSheets(order, action = 'upsert') {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action,
+        brand: 'COSMO',
+        sheet_name: 'Cosmo',
         order: payloadOrder
       }),
       redirect: 'follow'
@@ -1106,8 +1111,8 @@ app.post('/api/orders', async (req, res) => {
     const allIds = await db.all('SELECT id FROM orders');
     let maxNum = 1000;
     allIds.forEach(row => {
-      if (row.id && row.id.startsWith('BRK-')) {
-        const num = parseInt(row.id.replace('BRK-', ''), 10);
+      if (row.id && (row.id.startsWith('CSM-') || row.id.startsWith('BRK-'))) {
+        const num = parseInt(row.id.replace(/^(CSM-|BRK-)/, ''), 10);
         if (!isNaN(num) && num > maxNum) maxNum = num;
       }
     });
@@ -2410,9 +2415,9 @@ app.post('/api/sms/templates', async (req, res) => {
 // Google Таблицы: Тестовый запрос и пакетная синхронизация
 app.post('/api/integrations/google-sheets/test', async (req, res) => {
   const testOrder = {
-    id: 'BRK-TEST',
+    id: 'CSM-TEST',
     created_at: new Date().toLocaleDateString('ru-RU'),
-    client_name: 'Тестовый Клиент (BAROKOT CRM)',
+    client_name: 'Тестовый Клиент (COSMO CRM)',
     client_phone: '+998 90 123-45-67',
     client_address: 'г. Самарканд, ул. Регистан, 1',
     district: 'Сиёб',
