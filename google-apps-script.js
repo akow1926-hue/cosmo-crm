@@ -2,10 +2,16 @@
  * Google Apps Script Webhook — Barokot CRM & Cosmo Cleaning Multi-Brand Integration
  * 
  * Автоматически разделяет заказы по вкладкам:
- * - Вкладка "Barokot" (заказы BRK-XXXX от бренда Barokot)
  * - Вкладка "Cosmo" (заказы CSM-XXXX от бренда Cosmo Cleaning)
+ * - Вкладка "Barokot" (заказы BRK-XXXX от бренда Barokot)
  * 
- * Если вкладка не существует, скрипт автоматически создает её с фирменным стилем!
+ * Поддерживает действия:
+ * - upsert (добавление/обновление заказа)
+ * - delete (пометка заказа как удаленного)
+ * - delete_permanently (физическое удаление строки заказа)
+ * - clear_all (полная очистка всех заказов из вкладки)
+ * - batch_sync (пакетная синхронизация массива заказов)
+ * - get_orders (получение всех заказов в формате JSON)
  */
 
 function doPost(e) {
@@ -19,6 +25,18 @@ function doPost(e) {
     const payload = JSON.parse(e.postData.contents);
     const action = payload.action || 'upsert';
 
+    // 1. Полная очистка таблицы (кроме шапки)
+    if (action === 'clear_all') {
+      const sheet = getTargetSheet(ss, payload);
+      setupHeaders(sheet, sheet.getName());
+      const lastRow = sheet.getLastRow();
+      if (lastRow > 1) {
+        sheet.deleteRows(2, lastRow - 1);
+      }
+      return respondJson({ success: true, message: 'All orders cleared from ' + sheet.getName(), action: action });
+    }
+
+    // 2. Пакетная синхронизация
     if (action === 'batch_sync' && Array.isArray(payload.orders)) {
       payload.orders.forEach(function(o) {
         const sheet = getTargetSheet(ss, payload, o);
@@ -26,6 +44,14 @@ function doPost(e) {
         upsertOrderRow(sheet, o);
       });
       return respondJson({ success: true, count: payload.orders.length });
+    }
+
+    // 3. Получение заказов через POST
+    if (action === 'get_orders') {
+      const sheet = getTargetSheet(ss, payload);
+      setupHeaders(sheet, sheet.getName());
+      const orders = fetchOrdersFromSheet(sheet);
+      return respondJson({ success: true, orders: orders, count: orders.length });
     }
 
     const order = payload.order;
@@ -36,7 +62,9 @@ function doPost(e) {
     const sheet = getTargetSheet(ss, payload, order);
     setupHeaders(sheet, sheet.getName());
 
-    if (action === 'delete') {
+    if (action === 'delete_permanently') {
+      removeOrderRowPermanently(sheet, order.id);
+    } else if (action === 'delete') {
       deleteOrderRow(sheet, order.id, order.delete_reason);
     } else {
       upsertOrderRow(sheet, order);
@@ -51,6 +79,23 @@ function doPost(e) {
 function doGet(e) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const action = e && e.parameter && e.parameter.action;
+
+    if (action === 'get_orders') {
+      const sheetName = (e.parameter && e.parameter.sheet) || 'Cosmo';
+      let sheet = ss.getSheetByName(sheetName);
+      if (!sheet) sheet = ss.getSheets()[0];
+      const orders = fetchOrdersFromSheet(sheet);
+      return respondJson({
+        status: 'active',
+        app: 'Cosmo CRM Google Sheets Integration',
+        sheet: sheet.getName(),
+        orders: orders,
+        count: orders.length,
+        timestamp: new Date().toISOString()
+      });
+    }
+
     const sheets = ss.getSheets().map(function(s) { return s.getName(); });
     return respondJson({
       status: 'active',
@@ -74,17 +119,17 @@ function respondJson(obj, status) {
 }
 
 /**
- * Определяет или создает целевую вкладку (Barokot / Cosmo)
+ * Определяет или создает целевую вкладку (Cosmo / Barokot)
  */
 function getTargetSheet(ss, payload, order) {
   let sheetName = (payload && payload.sheet_name) || (order && order.sheet_name);
   if (!sheetName) {
     const brand = String((payload && payload.brand) || (order && order.brand) || '').toUpperCase();
     const orderId = String((order && order.id) || '').toUpperCase();
-    if (brand.includes('COSMO') || orderId.startsWith('CSM-')) {
-      sheetName = 'Cosmo';
-    } else {
+    if (brand.includes('BAROKOT') || orderId.startsWith('BRK-')) {
       sheetName = 'Barokot';
+    } else {
+      sheetName = 'Cosmo';
     }
   }
 
@@ -171,7 +216,7 @@ function upsertOrderRow(sheet, o) {
     String(o.client_phone || ''),
     String(o.client_address || ''),
     String(o.district || 'Сиёб'),
-    String(o.stage_ru || o.stage || 'Принят'),
+    String(o.stage_ru || o.stage || '1. К забору'),
     Number(o.total_m2) || 0,
     Number(o.total_price) || 0,
     Number(paidAmount) || 0,
@@ -201,4 +246,43 @@ function deleteOrderRow(sheet, orderId, reason) {
       break;
     }
   }
+}
+
+function removeOrderRowPermanently(sheet, orderId) {
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(orderId).trim()) {
+      sheet.deleteRow(i + 1);
+      break;
+    }
+  }
+}
+
+function fetchOrdersFromSheet(sheet) {
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const list = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    const id = String(r[0] || '').trim();
+    if (!id) continue;
+    list.push({
+      id: id,
+      created_at: String(r[1] || ''),
+      client_name: String(r[2] || ''),
+      client_phone: String(r[3] || ''),
+      client_address: String(r[4] || ''),
+      district: String(r[5] || 'Сиёб'),
+      stage: String(r[6] || ''),
+      total_m2: Number(r[7]) || 0,
+      total_price: Number(r[8]) || 0,
+      paid_amount: Number(r[9]) || 0,
+      payment_method: String(r[10] || 'cash'),
+      courier_name: String(r[11] || ''),
+      washer_name: String(r[12] || ''),
+      delivery_date: String(r[13] || ''),
+      notes: String(r[14] || '')
+    });
+  }
+  return list;
 }

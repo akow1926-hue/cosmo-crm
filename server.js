@@ -356,7 +356,14 @@ async function initDatabase() {
   await setSettingIfMissing('eskiz_from', '4546');
   await setSettingIfMissing('google_sheets_webhook_url', 'https://script.google.com/macros/s/AKfycbz74Jtn1LCkIrtwDYjJegO0wstTqMPUoiY7B0xxr30sicHdpGofrILWO7qVrCbrAoVP/exec');
 
+  // Очистка локальной таблицы orders (система работает исключительно с Google Таблицами)
+  try {
+    await db.run('DELETE FROM orders');
+  } catch (e) {}
+
   isInitialized = true;
+  // Фоновая первоначальная загрузка актуальных заказов из Google Таблиц
+  syncOrdersFromGoogleSheets(true).catch(e => console.warn('Init sheets sync notice:', e.message));
 }
 
 initPromise = initDatabase().catch(err => console.error('Database initialization error:', err));
@@ -617,7 +624,7 @@ function formatTelegramOrderCard(order) {
 
 // ================= HELPER FUNCTIONS: GOOGLE SHEETS SYNC =================
 const DEFAULT_GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbz74Jtn1LCkIrtwDYjJegO0wstTqMPUoiY7B0xxr30sicHdpGofrILWO7qVrCbrAoVP/exec';
-const DEFAULT_GOOGLE_SHEETS_CSV_URL = 'https://docs.google.com/spreadsheets/d/1-B_5nuofUe4XZhPMliyXoksdcKH9fbGcYifmddSWMf4/export?format=csv';
+const DEFAULT_GOOGLE_SHEETS_CSV_URL = 'https://docs.google.com/spreadsheets/d/1-B_5nuofUe4XZhPMliyXoksdcKH9fbGcYifmddSWMf4/gviz/tq?tqx=out:csv&sheet=Cosmo';
 
 async function getGoogleSheetsWebhookUrl() {
   try {
@@ -702,16 +709,29 @@ function normalizeStage(stage) {
   if (STAGE_RU_TO_EN[str]) return STAGE_RU_TO_EN[str];
   const lower = str.toLowerCase();
   if (['pickup', 'забор', '1. забор', 'к забору', '1. к забору', 'ожидает забора', '1. ожидает забора', 'ожидает', 'заявка', 'новая заявка', 'новый', 'принят', 'принята', 'прием', 'выезд', '1. выезд', 'new', 'pending', 'created', 'lead'].includes(lower)) return 'pickup';
-  if (['in_shop', 'dusting', 'washing', 'drying', 'in_wash', 'wash', 'в цеху', 'в цехе', 'стирка / в цехе', 'стирка в цехе', 'стирка', 'цех', '2. в цеху', '2. стирка / в цехе', '2. стирка', 'стираются', 'сушатся', 'сушильная камера', 'выбивание пыли'].includes(lower)) return 'in_shop';
+  if (['in_shop', 'measuring', 'замер', 'dusting', 'washing', 'drying', 'in_wash', 'wash', 'в цеху', 'в цехе', 'стирка / в цехе', 'стирка в цехе', 'стирка', 'цех', '2. в цеху', '2. стирка / в цехе', '2. стирка', 'стираются', 'сушатся', 'сушильная камера', 'выбивание пыли'].includes(lower)) return 'in_shop';
   if (['ready', 'готов к доставке', 'готов', 'готов в цеху', '3. готов к доставке', '3. готов', '3. готов в цеху', 'постиран', 'delivery', 'на доставке', 'в авто', '3. на доставке', 'доставка', 'в машине', 'доставка клиенту'].includes(lower)) return 'ready';
   if (['delivered', 'доставлен', 'доставлен / оплачен', 'выполнен', '4. доставлен', '4. выполнен', 'завершен', 'оплачен', 'done', 'completed'].includes(lower)) return 'delivered';
   if (['cancelled', 'canceled', 'отменен', 'отмена'].includes(lower)) return 'cancelled';
   return str;
 }
 
+function cleanMojibake(str) {
+  if (!str) return '';
+  let s = String(str);
+  s = s.replace(/РќР°Р»РёС‡РЅС‹Рµ/g, 'Наличные');
+  s = s.replace(/РќРµ РЅР°Р·РЅР°С‡РµРЅ/g, 'Не назначен');
+  s = s.replace(/Р¦РµС…/g, 'Цех');
+  s = s.replace(/РЎРёС‘Р±/g, 'Сиёб');
+  s = s.replace(/РџСЂРёРЅСЏС‚/g, 'Принят');
+  s = s.replace(/рџ—‘пёЏ\s*\[РЈР”РђР›Р•Рќ\]/g, '🗑️ [УДАЛЕН]');
+  s = s.replace(/\[РЈР”РђР›Р•Рќ\]/g, '🗑️ [УДАЛЕН]');
+  return s.trim();
+}
+
 function cleanCourierName(name) {
   if (!name) return '';
-  const s = String(name).trim();
+  const s = cleanMojibake(name);
   const lower = s.toLowerCase();
   if (
     lower === 'не назначен' ||
@@ -729,62 +749,115 @@ function cleanCourierName(name) {
   return s;
 }
 
-function parseCsv(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+// ================= GOOGLE SHEETS AS PRIMARY ORDERS STORE =================
+let ordersMemory = [];
+let lastSheetsSyncTime = 0;
+let isSyncingFromSheets = false;
+
+// Надежный парсер CSV по спецификации RFC-4180 с поддержкой многострочных полей в кавычках
+function parseCsvProper(text) {
   const rows = [];
-  for (const line of lines) {
-    const row = [];
-    let cur = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (inQuotes && line[i+1] === '"') { cur += '"'; i++; }
-        else { inQuotes = !inQuotes; }
-      } else if (ch === ',' && !inQuotes) {
-        row.push(cur);
-        cur = '';
+  let currentRow = [];
+  let currentField = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        currentField += '"';
+        i++;
       } else {
-        cur += ch;
+        inQuotes = !inQuotes;
       }
+    } else if (char === ',' && !inQuotes) {
+      currentRow.push(currentField);
+      currentField = '';
+    } else if ((char === '\r' || char === '\n') && !inQuotes) {
+      if (char === '\r' && nextChar === '\n') i++;
+      currentRow.push(currentField);
+      if (currentRow.some(f => f.trim().length > 0)) rows.push(currentRow);
+      currentRow = [];
+      currentField = '';
+    } else {
+      currentField += char;
     }
-    row.push(cur);
-    rows.push(row);
+  }
+  if (currentField || currentRow.length > 0) {
+    currentRow.push(currentField);
+    if (currentRow.some(f => f.trim().length > 0)) rows.push(currentRow);
   }
   return rows;
 }
 
-let lastSheetsSyncTime = 0;
+function findCachedOrder(id) {
+  return ordersMemory.find(o => String(o.id).trim() === String(id).trim());
+}
+
+function upsertCachedOrder(order) {
+  const targetId = String(order.id).trim();
+  const idx = ordersMemory.findIndex(o => String(o.id).trim() === targetId);
+  if (idx !== -1) {
+    ordersMemory[idx] = { ...ordersMemory[idx], ...order };
+  } else {
+    ordersMemory.unshift(order);
+  }
+}
+
+function removeCachedOrder(id) {
+  ordersMemory = ordersMemory.filter(o => String(o.id).trim() !== String(id).trim());
+}
 
 async function syncOrdersFromGoogleSheets(force = false) {
   const now = Date.now();
-  if (!force && (now - lastSheetsSyncTime < 10000)) return;
+  if (!force && (now - lastSheetsSyncTime < 10000)) return ordersMemory;
+  if (isSyncingFromSheets) return ordersMemory;
+  isSyncingFromSheets = true;
   lastSheetsSyncTime = now;
 
   try {
     const res = await fetch(DEFAULT_GOOGLE_SHEETS_CSV_URL, { redirect: 'follow' });
-    if (!res.ok) return;
+    if (!res.ok) {
+      isSyncingFromSheets = false;
+      return ordersMemory;
+    }
     const csvText = await res.text();
-    const rows = parseCsv(csvText);
-    if (rows.length <= 1) return;
+    const rows = parseCsvProper(csvText);
+    if (rows.length <= 1) {
+      ordersMemory = [];
+      isSyncingFromSheets = false;
+      return ordersMemory;
+    }
+
+    const loadedOrders = [];
 
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       const id = String(r[0] || '').trim();
-      // Строгая фильтрация брендов: Cosmo CRM импортирует только заказы Cosmo (игнорирует Barokot 'BRK-', legacy 4-значные и тесты)
-      if (!id || id === 'CSM-TEST' || id === 'BRK-TEST' || id.startsWith('BRK-') || /^\d{4}$/.test(id)) continue;
+      if (!id || id === 'номер ID' || id === 'ID Заказа' || id === 'CSM-TEST' || id === 'BRK-TEST') continue;
 
       const stageRaw = String(r[6] || '').trim();
-      const isDeleted = stageRaw.includes('[УДАЛЕН]') ? 1 : 0;
-      const cleanStageRaw = stageRaw.replace(/🗑️\s*\[УДАЛЕН\]:\s*/, '').trim();
-      const stage = STAGE_RU_TO_EN[cleanStageRaw] || 'pickup';
+      const isDeleted = (
+        stageRaw.toLowerCase().includes('удален') ||
+        stageRaw.includes('РЈР”РђР›Р•Рќ') ||
+        stageRaw.includes('рџ') ||
+        stageRaw.includes('🗑') ||
+        stageRaw.includes('Очистка') ||
+        stageRaw.toLowerCase().includes('корзин')
+      ) ? 1 : 0;
+      const cleanStageRaw = cleanMojibake(stageRaw
+        .replace(/🗑️\s*\[УДАЛЕН\]:\s*|\[УДАЛЕН\]:\s*|\[УДАЛЕН\]/gi, '')
+        .replace(/рџ[^\s]*\s*\[РЈР”РђР›Р•Рќ\]:\s*|\[РЈР”РђР›Р•Рќ\]:\s*/gi, '')
+        .replace(/Очистка всех заказов/gi, '')
+        .trim());
+      const stage = normalizeStage(cleanStageRaw || 'pickup');
 
       const createdAt = String(r[1] || '').trim() || new Date().toLocaleDateString('ru-RU');
-      const clientName = String(r[2] || '').trim();
+      const clientName = cleanMojibake(String(r[2] || '').trim());
       const rawPhone = String(r[3] || '').replace(/^'/, '').trim();
       const clientPhone = rawPhone.startsWith('#') ? '+998 90 123-45-67' : rawPhone;
-      const clientAddress = String(r[4] || '').trim();
-      const district = String(r[5] || 'Сиёб').trim();
+      const clientAddress = cleanMojibake(String(r[4] || '').trim());
+      const district = cleanMojibake(String(r[5] || 'Сиёб').trim()) || 'Сиёб';
       const totalM2 = parseFloat(String(r[7] || '').replace(',', '.')) || 0;
       const totalPrice = parseInt(String(r[8] || '').replace(/\D/g, ''), 10) || 0;
       const paidAmount = parseInt(String(r[9] || '').replace(/\D/g, ''), 10) || 0;
@@ -794,35 +867,68 @@ async function syncOrdersFromGoogleSheets(force = false) {
       if (rawMethod.includes('click')) paymentMethod = 'click';
       else if (rawMethod.includes('payme')) paymentMethod = 'payme';
       else if (rawMethod.includes('card') || rawMethod.includes('карт')) paymentMethod = 'card';
-      const courierName = String(r[11] || '').trim();
-      const washerName = String(r[12] || '').trim();
+      paymentMethod = cleanMojibake(paymentMethod);
+      const courierName = cleanCourierName(r[11] || '');
+      const washerName = cleanMojibake(String(r[12] || '').trim()) || 'Цех';
       const deliveryDate = String(r[13] || '').trim();
-      const notes = String(r[14] || '').trim();
+      const notes = cleanMojibake(String(r[14] || '').trim());
 
-      const existing = await db.get('SELECT id FROM orders WHERE id = ?', [id]);
-      if (existing) {
-        await db.run(`
-          UPDATE orders 
-          SET client_name = ?, client_phone = ?, client_address = ?, district = ?,
-              stage = ?, total_m2 = ?, total_price = ?, paid_amount = ?, paid = ?,
-              payment_method = ?, courier_name = ?, washer_name = ?, delivery_date = ?, notes = ?, is_deleted = ?
-          WHERE id = ?
-        `, [clientName, clientPhone, clientAddress, district, stage, totalM2, totalPrice, paidAmount, paid, paymentMethod, courierName, washerName, deliveryDate, notes, isDeleted, id]);
-      } else {
-        const carpetsJson = JSON.stringify([{ name: 'Ковер', area: totalM2, price: 14000, total: totalPrice }]);
-        await db.run(`
-          INSERT INTO orders (
-            id, client_name, client_phone, client_address, district, stage,
-            total_m2, total_price, paid_amount, paid, payment_method,
-            courier_name, washer_name, delivery_date, notes, carpets_json, extras_json,
-            created_at, is_deleted, landmark, language, time_slot, urgent, pickup_date
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, '', 'Русский', 'В любое время', 0, ?)
-        `, [id, clientName, clientPhone, clientAddress, district, stage, totalM2, totalPrice, paidAmount, paid, paymentMethod, courierName, washerName, deliveryDate, notes, carpetsJson, createdAt, isDeleted, createdAt]);
-      }
+      const existingMem = findCachedOrder(id);
+      const carpets = (existingMem && existingMem.carpets && existingMem.carpets.length > 0)
+        ? existingMem.carpets
+        : [{ name: 'Ковер', area: totalM2, price: 16000, total: totalPrice }];
+
+      loadedOrders.push({
+        id,
+        client_name: clientName,
+        client_phone: clientPhone,
+        client_address: clientAddress,
+        district,
+        stage,
+        total_m2: totalM2,
+        total_price: totalPrice,
+        paid_amount: paidAmount,
+        paid: Boolean(paid),
+        payment_method: paymentMethod,
+        courier_name: courierName,
+        washer_name: washerName,
+        dispatcher_name: existingMem ? existingMem.dispatcher_name : 'Диспетчер',
+        delivery_date: deliveryDate,
+        delivery_time: existingMem ? existingMem.delivery_time : '',
+        notes,
+        carpets,
+        carpets_json: JSON.stringify(carpets),
+        extras: existingMem ? existingMem.extras : [],
+        extras_json: existingMem ? existingMem.extras_json : '[]',
+        photos: existingMem ? existingMem.photos : [],
+        photos_json: existingMem ? existingMem.photos_json : '[]',
+        created_at: createdAt,
+        pickup_date: existingMem ? existingMem.pickup_date : createdAt,
+        is_deleted: Boolean(isDeleted),
+        landmark: existingMem ? existingMem.landmark : '',
+        language: existingMem ? existingMem.language : 'Русский',
+        time_slot: existingMem ? existingMem.time_slot : 'В любое время',
+        urgent: existingMem ? Boolean(existingMem.urgent) : false,
+        gps_location: existingMem ? existingMem.gps_location : '',
+        sms_sent_stages: existingMem ? existingMem.sms_sent_stages : '',
+        tg_sent: existingMem ? existingMem.tg_sent : 0,
+        rating: existingMem ? existingMem.rating : 0,
+        review_text: existingMem ? existingMem.review_text : '',
+        completed_date: stage === 'delivered' ? (existingMem?.completed_date || deliveryDate || new Date().toISOString()) : null
+      });
     }
+
+    // Сохраняем недавние локальные заказы (до 60 сек), чтобы они не затирались при задержке экспорта Google Sheets
+    const recentLocalOrders = ordersMemory.filter(o => o.created_locally_at && (Date.now() - o.created_locally_at < 60000));
+    const loadedIds = new Set(loadedOrders.map(o => o.id));
+    const preserved = recentLocalOrders.filter(o => !loadedIds.has(o.id));
+    ordersMemory = [...preserved, ...loadedOrders];
   } catch (err) {
     console.warn('Sync from Google Sheets error:', err.message);
+  } finally {
+    isSyncingFromSheets = false;
   }
+  return ordersMemory;
 }
 
 async function syncOrderToGoogleSheets(order, action = 'upsert') {
@@ -867,8 +973,8 @@ async function syncAllOrdersToGoogleSheets() {
       return { success: false, reason: 'Google Sheets webhook URL not configured' };
     }
 
-    const orders = await db.all("SELECT * FROM orders WHERE is_deleted = 0 ORDER BY id ASC");
-    const formattedOrders = orders.map(o => ({
+    const activeOrders = ordersMemory.filter(o => !o.is_deleted);
+    const formattedOrders = activeOrders.map(o => ({
       ...o,
       stage_ru: STAGE_LABELS_RU[o.stage] || o.stage || 'Принят'
     }));
@@ -884,7 +990,7 @@ async function syncAllOrdersToGoogleSheets() {
     });
 
     const data = await res.json().catch(() => null);
-    return { success: res.ok, count: orders.length, data };
+    return { success: res.ok, count: activeOrders.length, data };
   } catch (err) {
     console.warn('Google Sheets batch sync notice:', err.message);
     return { success: false, error: err.message };
@@ -997,89 +1103,49 @@ app.delete('/api/services/:id', async (req, res) => {
   res.json({ success: true });
 });
 
-// 4. Заказы
+// 4. Заказы (Единый источник истины: Google Таблицы)
 app.get('/api/orders', async (req, res) => {
-  const { stage, district, search, deleted, includeDeleted } = req.query;
+  const { stage, district, search, deleted, includeDeleted, refresh } = req.query;
 
-  // Автоматическое восстановление из Google Таблицы при холодном старте Vercel
-  try {
-    const countRow = await db.get('SELECT COUNT(*) as count FROM orders');
-    if (!countRow || countRow.count === 0) {
-      await syncOrdersFromGoogleSheets(true);
-    }
-  } catch (err) {
-    console.warn('Sync check notice on GET /api/orders:', err.message);
+  if (refresh === '1' || refresh === 'true' || ordersMemory.length === 0) {
+    await syncOrdersFromGoogleSheets(Boolean(refresh));
+  } else {
+    syncOrdersFromGoogleSheets(false).catch(() => {});
   }
 
   const isTrash = deleted === '1' || deleted === 'true' || includeDeleted === 'true' || includeDeleted === '1';
-  let sql = isTrash ? 'SELECT * FROM orders WHERE is_deleted = 1' : 'SELECT * FROM orders WHERE is_deleted = 0';
-  const params = [];
+  let list = ordersMemory.filter(o => isTrash ? o.is_deleted : !o.is_deleted);
 
   if (stage && stage !== 'all') {
-    sql += ' AND stage = ?';
-    params.push(stage);
+    list = list.filter(o => o.stage === stage);
   }
 
   if (district && district !== 'all') {
-    sql += ' AND district = ?';
-    params.push(district);
+    list = list.filter(o => o.district === district);
   }
 
   if (search) {
-    sql += ' AND (id LIKE ? OR client_name LIKE ? OR client_phone LIKE ? OR client_address LIKE ?)';
-    const term = `%${search}%`;
-    params.push(term, term, term, term);
+    const s = search.toLowerCase();
+    list = list.filter(o =>
+      (o.id && o.id.toLowerCase().includes(s)) ||
+      (o.client_name && o.client_name.toLowerCase().includes(s)) ||
+      (o.client_phone && o.client_phone.toLowerCase().includes(s)) ||
+      (o.client_address && o.client_address.toLowerCase().includes(s))
+    );
   }
 
-  sql += ' ORDER BY rowid DESC';
-  const rows = await db.all(sql, params);
-
-  const parsed = rows.map(r => {
-    let carpets = [];
-    try { carpets = JSON.parse(r.carpets_json || '[]'); } catch (e) { carpets = []; }
-    let extras = [];
-    try { extras = JSON.parse(r.extras_json || '[]'); } catch (e) { extras = []; }
-    let photos = [];
-    try { photos = JSON.parse(r.photos_json || '[]'); } catch (e) { photos = []; }
-    return {
-      ...r,
-      stage: normalizeStage(r.stage),
-      courier_name: cleanCourierName(r.courier_name),
-      paid: Boolean(r.paid),
-      urgent: Boolean(r.urgent),
-      is_deleted: Boolean(r.is_deleted),
-      carpets,
-      extras,
-      photos
-    };
-  });
-
-  res.json(parsed);
+  res.json(list);
 });
 
 app.get('/api/orders/:id', async (req, res) => {
   const { id } = req.params;
-  const row = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (!row) return res.status(404).json({ error: 'Заказ не найден' });
-
-  let carpets = [];
-  try { carpets = JSON.parse(row.carpets_json || '[]'); } catch (e) { carpets = []; }
-  let extras = [];
-  try { extras = JSON.parse(row.extras_json || '[]'); } catch (e) { extras = []; }
-  let photos = [];
-  try { photos = JSON.parse(row.photos_json || '[]'); } catch (e) { photos = []; }
-
-  res.json({
-    ...row,
-    stage: normalizeStage(row.stage),
-    courier_name: cleanCourierName(row.courier_name),
-    paid: Boolean(row.paid),
-    urgent: Boolean(row.urgent),
-    is_deleted: Boolean(row.is_deleted),
-    carpets,
-    extras,
-    photos
-  });
+  let order = findCachedOrder(id);
+  if (!order) {
+    await syncOrdersFromGoogleSheets(true);
+    order = findCachedOrder(id);
+  }
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
+  res.json(order);
 });
 
 // Создание нового заказа
@@ -1102,15 +1168,13 @@ app.post('/api/orders', async (req, res) => {
   let orderId = '';
   if (custom_id && String(custom_id).trim()) {
     const candidateId = String(custom_id).trim();
-    const existing = await db.get('SELECT id FROM orders WHERE id = ?', [candidateId]);
-    if (existing) {
+    if (findCachedOrder(candidateId)) {
       return res.status(400).json({ error: `Заказ с номером "${candidateId}" уже существует!` });
     }
     orderId = candidateId;
   } else {
-    const allIds = await db.all('SELECT id FROM orders');
     let maxNum = 1000;
-    allIds.forEach(row => {
+    ordersMemory.forEach(row => {
       if (row.id && (row.id.startsWith('CSM-') || row.id.startsWith('BRK-'))) {
         const num = parseInt(row.id.replace(/^(CSM-|BRK-)/, ''), 10);
         if (!isNaN(num) && num > maxNum) maxNum = num;
@@ -1120,7 +1184,7 @@ app.post('/api/orders', async (req, res) => {
   }
 
   const items = Array.isArray(carpets) && carpets.length > 0 ? carpets : [
-    { name: 'Gilam Standart', unit: 'м²', qty: 1, price: 14000, total: 0 }
+    { name: 'Gilam Standart', unit: 'м²', qty: 1, price: 16000, total: 0 }
   ];
 
   let totalM2 = 0;
@@ -1135,7 +1199,7 @@ app.post('/api/orders', async (req, res) => {
     } else if (c.total) {
       totalPrice += Math.max(0, parseFloat(c.total) || 0);
     } else if (area > 0) {
-      totalPrice += Math.max(0, area * (parseFloat(c.price) || 14000));
+      totalPrice += Math.max(0, area * (parseFloat(c.price) || 16000));
     }
   });
 
@@ -1152,43 +1216,48 @@ app.post('/api/orders', async (req, res) => {
     finalGps = existingClient.gps_location.trim();
   }
 
-  await db.run(`
-    INSERT INTO orders (
-      id, client_name, client_phone, client_address, district, landmark, language,
-      time_slot, urgent, created_at, pickup_date, delivery_date, delivery_time,
-      stage, courier_name, washer_name, dispatcher_name, paid, paid_amount, payment_method,
-      total_m2, total_price, carpets_json, extras_json, notes, gps_location, sms_sent_stages, tg_sent
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [
-    orderId,
-    trimmedName,
-    trimmedPhone,
-    trimmedAddress,
-    String(district || 'Сиёб').trim(),
-    String(landmark || '').trim(),
-    String(language || 'Русский').trim(),
-    String(time_slot || 'В любое время').trim(),
-    urgent ? 1 : 0,
-    dateStr,
-    pickup_date || dateStr,
-    delivery_date || '',
-    delivery_time || '',
-    stage ? normalizeStage(stage) : 'pickup',
-    cleanCourierName(courier_name),
-    String(washer_name || '').trim(),
-    String(dispatcher_name || 'Диспетчер').trim(),
-    0,
-    0,
-    'cash',
-    +totalM2.toFixed(2),
-    totalPrice,
-    JSON.stringify(items),
-    JSON.stringify(extras || []),
-    notes || '',
-    finalGps,
-    'pickup',
-    1
-  ]);
+  const createdOrder = {
+    id: orderId,
+    client_name: trimmedName,
+    client_phone: trimmedPhone,
+    client_address: trimmedAddress,
+    district: String(district || 'Сиёб').trim(),
+    landmark: String(landmark || '').trim(),
+    language: String(language || 'Русский').trim(),
+    time_slot: String(time_slot || 'В любое время').trim(),
+    urgent: Boolean(urgent),
+    created_at: dateStr,
+    pickup_date: pickup_date || dateStr,
+    delivery_date: delivery_date || '',
+    delivery_time: delivery_time || '',
+    stage: stage ? normalizeStage(stage) : 'pickup',
+    courier_name: cleanCourierName(courier_name),
+    washer_name: String(washer_name || '').trim(),
+    dispatcher_name: String(dispatcher_name || 'Диспетчер').trim(),
+    paid: false,
+    paid_amount: 0,
+    payment_method: 'cash',
+    underpaid_reason: '',
+    total_m2: +totalM2.toFixed(2),
+    total_price: totalPrice,
+    carpets: items,
+    carpets_json: JSON.stringify(items),
+    extras: extras || [],
+    extras_json: JSON.stringify(extras || []),
+    photos: [],
+    photos_json: '[]',
+    notes: notes || '',
+    gps_location: finalGps,
+    sms_sent_stages: 'pickup',
+    tg_sent: 1,
+    is_deleted: false,
+    rating: 0,
+    review_text: '',
+    completed_date: null,
+    created_locally_at: Date.now()
+  };
+
+  upsertCachedOrder(createdOrder);
 
   if (existingClient) {
     await db.run(`
@@ -1206,18 +1275,16 @@ app.post('/api/orders', async (req, res) => {
   }
 
   // Аудит
-  await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
-    [orderId, dispatcher_name || 'Диспетчер', `Создан заказ #${orderId}`, new Date().toISOString()]);
+  try {
+    await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
+      [orderId, dispatcher_name || 'Диспетчер', `Создан заказ #${orderId}`, new Date().toISOString()]);
+  } catch(e) {}
 
-  // Автоматические уведомления (Telegram + SMS + Google Таблицы)
-  const createdOrder = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]);
-  if (createdOrder) {
-    sendTelegramNotification(formatTelegramOrderCard(createdOrder)).catch(e => console.warn('TG auto notify err:', e.message));
-    const smsMsg = formatSmsMessage('created', createdOrder, items, totalM2, totalPrice);
-    sendEskizSms(trimmedPhone, smsMsg, orderId)
-      .catch(e => console.warn('SMS auto notify err:', e.message));
-    syncOrderToGoogleSheets(createdOrder, 'upsert').catch(e => console.warn('Sheets auto-sync err:', e.message));
-  }
+  // Автоматические уведомления и прямая запись в Google Таблицы
+  sendTelegramNotification(formatTelegramOrderCard(createdOrder)).catch(e => console.warn('TG auto notify err:', e.message));
+  const smsMsg = formatSmsMessage('created', createdOrder, items, totalM2, totalPrice);
+  sendEskizSms(trimmedPhone, smsMsg, orderId).catch(e => console.warn('SMS auto notify err:', e.message));
+  syncOrderToGoogleSheets(createdOrder, 'upsert').catch(e => console.warn('Sheets auto-sync err:', e.message));
 
   res.json({ success: true, orderId, id: orderId, total_price: totalPrice });
 });
@@ -1234,14 +1301,20 @@ app.put('/api/orders/:id', async (req, res) => {
   } = req.body;
 
   let currentId = id;
+  let order = findCachedOrder(id);
+  if (!order) {
+    await syncOrdersFromGoogleSheets(true);
+    order = findCachedOrder(id);
+  }
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
+
   if (new_id && String(new_id).trim() && String(new_id).trim() !== id) {
     const targetNewId = String(new_id).trim();
-    const existing = await db.get('SELECT id FROM orders WHERE id = ?', [targetNewId]);
-    if (existing) {
+    if (findCachedOrder(targetNewId)) {
       return res.status(400).json({ error: `Заказ с номером "${targetNewId}" уже существует!` });
     }
-    await db.run('UPDATE orders SET id = ? WHERE id = ?', [targetNewId, id]);
-    await db.run('UPDATE audit_logs SET order_id = ? WHERE order_id = ?', [targetNewId, id]);
+    removeCachedOrder(id);
+    order.id = targetNewId;
     currentId = targetNewId;
   }
 
@@ -1257,114 +1330,95 @@ app.put('/api/orders/:id', async (req, res) => {
       } else if (c.total) {
         totalPrice += Math.max(0, parseFloat(c.total) || 0);
       } else if (area > 0) {
-        totalPrice += Math.max(0, area * (parseFloat(c.price) || 14000));
+        totalPrice += Math.max(0, area * (parseFloat(c.price) || 16000));
       }
     });
   }
 
   if (urgent) totalPrice = Math.round(totalPrice * 1.2);
 
-  const existingOrder = await db.get('SELECT * FROM orders WHERE id = ?', [currentId]);
-  if (!existingOrder) return res.status(404).json({ error: 'Заказ не найден' });
+  let finalCarpets = order.carpets;
+  let finalTotalM2 = order.total_m2;
+  let finalTotalPrice = order.total_price;
 
-  // Если заказ уже замерян в цеху (existingOrder.total_m2 > 0), сохраняем замеры мастера
-  let finalCarpetsJson = existingOrder.carpets_json;
-  let finalTotalM2 = existingOrder.total_m2;
-  let finalTotalPrice = existingOrder.total_price;
-
-  if ((existingOrder.total_m2 > 0 || existingOrder.total_price > 0) && totalM2 === 0 && totalPrice === 0) {
-    finalCarpetsJson = existingOrder.carpets_json;
-    finalTotalM2 = existingOrder.total_m2;
-    finalTotalPrice = existingOrder.total_price;
+  if ((order.total_m2 > 0 || order.total_price > 0) && totalM2 === 0 && totalPrice === 0) {
+    finalCarpets = order.carpets;
+    finalTotalM2 = order.total_m2;
+    finalTotalPrice = order.total_price;
   } else if (Array.isArray(carpets) && carpets.length > 0) {
-    finalCarpetsJson = JSON.stringify(carpets);
+    finalCarpets = carpets;
     finalTotalM2 = +totalM2.toFixed(2);
     finalTotalPrice = totalPrice;
   }
 
-  const finalPaidAmount = paid_amount !== undefined ? Number(paid_amount) : existingOrder.paid_amount;
-  const isPaid = paid !== undefined ? (paid ? 1 : 0) : (finalPaidAmount >= finalTotalPrice ? 1 : 0);
-  const newStage = normalizeStage(stage || existingOrder.stage);
-  const newCourier = cleanCourierName(courier_name !== undefined ? courier_name : existingOrder.courier_name);
+  const finalPaidAmount = paid_amount !== undefined ? Number(paid_amount) : order.paid_amount;
+  const isPaid = paid !== undefined ? Boolean(paid) : (finalPaidAmount >= finalTotalPrice);
+  const newStage = normalizeStage(stage || order.stage);
+  const newCourier = cleanCourierName(courier_name !== undefined ? courier_name : order.courier_name);
 
-  await db.run(`
-    UPDATE orders 
-    SET client_name = ?, client_phone = ?, client_address = ?, district = ?, landmark = ?, language = ?,
-        time_slot = ?, urgent = ?, pickup_date = ?, delivery_date = ?, delivery_time = ?,
-        stage = ?, courier_name = ?, washer_name = ?, dispatcher_name = ?, paid = ?, paid_amount = ?,
-        payment_method = ?, underpaid_reason = ?, total_m2 = ?, total_price = ?, carpets_json = ?,
-        extras_json = ?, notes = ?, gps_location = ?
-    WHERE id = ?
-  `, [
-    client_name !== undefined ? String(client_name).trim() : existingOrder.client_name,
-    client_phone !== undefined ? String(client_phone).trim() : existingOrder.client_phone,
-    client_address !== undefined ? String(client_address).trim() : existingOrder.client_address,
-    district !== undefined ? String(district).trim() : existingOrder.district,
-    landmark !== undefined ? String(landmark).trim() : existingOrder.landmark,
-    language !== undefined ? String(language).trim() : existingOrder.language,
-    time_slot !== undefined ? String(time_slot).trim() : existingOrder.time_slot,
-    urgent !== undefined ? (urgent ? 1 : 0) : existingOrder.urgent,
-    pickup_date !== undefined ? pickup_date : existingOrder.pickup_date,
-    delivery_date !== undefined ? delivery_date : existingOrder.delivery_date,
-    delivery_time !== undefined ? delivery_time : existingOrder.delivery_time,
-    newStage,
-    newCourier,
-    washer_name !== undefined ? String(washer_name).trim() : existingOrder.washer_name,
-    dispatcher_name !== undefined ? String(dispatcher_name).trim() : existingOrder.dispatcher_name,
-    isPaid,
-    finalPaidAmount,
-    payment_method !== undefined ? payment_method : existingOrder.payment_method,
-    underpaid_reason !== undefined ? String(underpaid_reason).trim() : existingOrder.underpaid_reason,
-    finalTotalM2,
-    finalTotalPrice,
-    finalCarpetsJson,
-    extras ? JSON.stringify(extras) : existingOrder.extras_json,
-    notes !== undefined ? notes : existingOrder.notes,
-    gps_location !== undefined ? gps_location : existingOrder.gps_location,
-    currentId
-  ]);
+  order.client_name = client_name !== undefined ? String(client_name).trim() : order.client_name;
+  order.client_phone = client_phone !== undefined ? String(client_phone).trim() : order.client_phone;
+  order.client_address = client_address !== undefined ? String(client_address).trim() : order.client_address;
+  order.district = district !== undefined ? String(district).trim() : order.district;
+  order.landmark = landmark !== undefined ? String(landmark).trim() : order.landmark;
+  order.language = language !== undefined ? String(language).trim() : order.language;
+  order.time_slot = time_slot !== undefined ? String(time_slot).trim() : order.time_slot;
+  order.urgent = urgent !== undefined ? Boolean(urgent) : order.urgent;
+  order.pickup_date = pickup_date !== undefined ? pickup_date : order.pickup_date;
+  order.delivery_date = delivery_date !== undefined ? delivery_date : order.delivery_date;
+  order.delivery_time = delivery_time !== undefined ? delivery_time : order.delivery_time;
+  order.stage = newStage;
+  order.courier_name = newCourier;
+  order.washer_name = washer_name !== undefined ? String(washer_name).trim() : order.washer_name;
+  order.dispatcher_name = dispatcher_name !== undefined ? String(dispatcher_name).trim() : order.dispatcher_name;
+  order.paid = isPaid;
+  order.paid_amount = finalPaidAmount;
+  order.payment_method = payment_method !== undefined ? payment_method : order.payment_method;
+  order.underpaid_reason = underpaid_reason !== undefined ? String(underpaid_reason).trim() : order.underpaid_reason;
+  order.total_m2 = finalTotalM2;
+  order.total_price = finalTotalPrice;
+  order.carpets = finalCarpets;
+  order.carpets_json = JSON.stringify(finalCarpets);
+  if (extras) {
+    order.extras = extras;
+    order.extras_json = JSON.stringify(extras);
+  }
+  order.notes = notes !== undefined ? notes : order.notes;
+  order.gps_location = gps_location !== undefined ? gps_location : order.gps_location;
 
-  // Триггеры SMS по этапам и синхронизация GPS
-  const sentStages = existingOrder.sms_sent_stages 
-    ? existingOrder.sms_sent_stages.split(',').map(s => s.trim()).filter(Boolean)
-    : [];
-  const phone = client_phone || existingOrder.client_phone;
+  upsertCachedOrder(order);
 
-  // Синхронизация GPS клиента при обновлении
+  // Синхронизация GPS клиента
+  const phone = client_phone || order.client_phone;
   if (gps_location && String(gps_location).includes(',') && phone) {
     try {
       await db.run('UPDATE clients SET gps_location = ? WHERE phone = ?', [String(gps_location).trim(), phone]);
-    } catch (e) {
-      console.warn('Failed to update client gps in patch order:', e.message);
-    }
+    } catch (e) {}
   }
 
+  // Уведомления SMS/TG
+  const sentStages = order.sms_sent_stages ? order.sms_sent_stages.split(',').map(s => s.trim()).filter(Boolean) : [];
   if (newStage === 'ready' && !sentStages.includes('ready')) {
-    const readySms = formatSmsMessage('ready', { ...existingOrder, courier_name: newCourier, id: currentId }, finalCarpets, finalTotalM2, finalTotalPrice);
-    sendEskizSms(phone, readySms, currentId)
-      .catch(e => console.warn('SMS ready err:', e.message));
+    const readySms = formatSmsMessage('ready', { ...order, courier_name: newCourier, id: currentId }, finalCarpets, finalTotalM2, finalTotalPrice);
+    sendEskizSms(phone, readySms, currentId).catch(e => console.warn('SMS ready err:', e.message));
     sentStages.push('ready');
-    await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), currentId]);
+    order.sms_sent_stages = sentStages.join(',');
 
     const readyTgMsg = `🧼 *ЗАКАЗ #${currentId} ГОТОВ К ДОСТАВКЕ!*\n` +
-      `👤 Клиент: ${existingOrder.client_name}\n` +
-      `📍 Адрес: ${existingOrder.client_address || 'Самарканд'} (${existingOrder.district || 'Сиёб'})\n` +
+      `👤 Клиент: ${order.client_name}\n` +
+      `📍 Адрес: ${order.client_address || 'Самарканд'} (${order.district || 'Сиёб'})\n` +
       `💰 К оплате: ${Number(finalTotalPrice || 0).toLocaleString('ru-RU')} сум\n` +
       `🚚 Курьер доставки: ${newCourier || 'Любой свободный'}\n` +
       `👤 Сотрудник: ${String(washer_name || dispatcher_name || 'Администратор').trim()}`;
     sendTelegramNotification(readyTgMsg).catch(e => console.warn('TG ready notify err:', e.message));
   } else if (newStage === 'delivered' && !sentStages.includes('delivered')) {
-    const delSms = formatSmsMessage('delivered', { ...existingOrder, courier_name: newCourier, id: currentId }, finalCarpets, finalTotalM2, finalTotalPrice);
-    sendEskizSms(phone, delSms, currentId)
-      .catch(e => console.warn('SMS delivered err:', e.message));
+    const delSms = formatSmsMessage('delivered', { ...order, courier_name: newCourier, id: currentId }, finalCarpets, finalTotalM2, finalTotalPrice);
+    sendEskizSms(phone, delSms, currentId).catch(e => console.warn('SMS delivered err:', e.message));
     sentStages.push('delivered');
-    await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), currentId]);
+    order.sms_sent_stages = sentStages.join(',');
   }
 
-  const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [currentId]);
-  if (updatedOrder) {
-    syncOrderToGoogleSheets(updatedOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-  }
+  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
 
   res.json({ success: true, id: currentId });
 });
@@ -1373,139 +1427,122 @@ app.put('/api/orders/:id', async (req, res) => {
 app.patch('/api/orders/:id/stage', async (req, res) => {
   const { id } = req.params;
   const { stage, actor_name, courier_name, delivery_date, notes, carpets, gps_location } = req.body;
-  const existingOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (!existingOrder) return res.status(404).json({ error: 'Заказ не найден' });
-
-  let carpetsJson = existingOrder.carpets_json;
-  let totalM2 = existingOrder.total_m2;
-  let totalPrice = existingOrder.total_price;
+  let order = findCachedOrder(id);
+  if (!order) {
+    await syncOrdersFromGoogleSheets(true);
+    order = findCachedOrder(id);
+  }
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
   if (Array.isArray(carpets) && carpets.length > 0) {
-    carpetsJson = JSON.stringify(carpets);
-    totalM2 = carpets.reduce((sum, it) => sum + (Number(it.area) || ((Number(it.length) || 0) * (Number(it.width) || 0)) || 0), 0);
+    order.carpets = carpets;
+    order.carpets_json = JSON.stringify(carpets);
+    order.total_m2 = carpets.reduce((sum, it) => sum + (Number(it.area) || ((Number(it.length) || 0) * (Number(it.width) || 0)) || 0), 0);
     const calcPrice = carpets.reduce((sum, it) => sum + (Number(it.total) || Number(it.price) || 0), 0);
-    if (calcPrice > 0) totalPrice = calcPrice;
+    if (calcPrice > 0) order.total_price = calcPrice;
   }
 
-  const normalizedStage = normalizeStage(stage || existingOrder.stage);
-  const newCourier = cleanCourierName(courier_name !== undefined ? courier_name : existingOrder.courier_name);
-  const newDeliveryDate = delivery_date || existingOrder.delivery_date;
-  const newNotes = notes || existingOrder.notes;
-  const newGps = (gps_location !== undefined && gps_location !== null) ? gps_location : existingOrder.gps_location;
-  const completedDate = normalizedStage === 'delivered' ? (existingOrder.completed_date || new Date().toISOString()) : existingOrder.completed_date;
+  const oldStage = order.stage;
+  const normalizedStage = normalizeStage(stage || order.stage);
+  const newCourier = cleanCourierName(courier_name !== undefined ? courier_name : order.courier_name);
+  order.stage = normalizedStage;
+  order.courier_name = newCourier;
+  if (delivery_date) order.delivery_date = delivery_date;
+  if (notes) order.notes = notes;
+  if (gps_location !== undefined && gps_location !== null) order.gps_location = gps_location;
+  if (normalizedStage === 'delivered') order.completed_date = order.completed_date || new Date().toISOString();
 
-  await db.run(`
-    UPDATE orders 
-    SET stage = ?, courier_name = ?, delivery_date = ?, notes = ?, carpets_json = ?, total_m2 = ?, total_price = ?, gps_location = ?, completed_date = ?
-    WHERE id = ?
-  `, [normalizedStage, newCourier, newDeliveryDate, newNotes, carpetsJson, totalM2, totalPrice, newGps, completedDate, id]);
+  upsertCachedOrder(order);
 
-  // Синхронизация точной GPS точки забора курьера в карточку клиента
-  if (newGps && String(newGps).includes(',') && existingOrder.client_phone) {
+  // Синхронизация GPS
+  if (order.gps_location && String(order.gps_location).includes(',') && order.client_phone) {
     try {
-      await db.run('UPDATE clients SET gps_location = ? WHERE phone = ?', [String(newGps).trim(), existingOrder.client_phone]);
-    } catch (e) {
-      console.warn('Failed to update client gps in stage patch:', e.message);
-    }
+      await db.run('UPDATE clients SET gps_location = ? WHERE phone = ?', [String(order.gps_location).trim(), order.client_phone]);
+    } catch (e) {}
   }
 
-  // Триггеры SMS и Telegram при смене этапа
-  const sentStages = existingOrder.sms_sent_stages 
-    ? existingOrder.sms_sent_stages.split(',').map(s => s.trim()).filter(Boolean)
-    : [];
-
+  // Уведомления
+  const sentStages = order.sms_sent_stages ? order.sms_sent_stages.split(',').map(s => s.trim()).filter(Boolean) : [];
   let smsResult = null;
-  const phone = existingOrder.client_phone;
+  const phone = order.client_phone;
 
   if (normalizedStage === 'ready' && !sentStages.includes('ready')) {
     if (phone) {
-      const readySms = formatSmsMessage('ready', { ...existingOrder, courier_name: newCourier, id }, carpets, totalM2, totalPrice);
-      smsResult = await sendEskizSms(phone, readySms, id)
-        .catch(e => console.warn('SMS ready err:', e.message));
+      const readySms = formatSmsMessage('ready', { ...order, courier_name: newCourier, id }, order.carpets, order.total_m2, order.total_price);
+      smsResult = await sendEskizSms(phone, readySms, id).catch(e => console.warn('SMS ready err:', e.message));
       sentStages.push('ready');
-      await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), id]);
+      order.sms_sent_stages = sentStages.join(',');
     }
 
     const readyTgMsg = `🧼 *ЗАКАЗ #${id} ГОТОВ К ДОСТАВКЕ!*\n` +
-      `👤 Клиент: ${existingOrder.client_name}\n` +
-      `📍 Адрес: ${existingOrder.client_address || 'Самарканд'} (${existingOrder.district || 'Сиёб'})\n` +
-      `💰 К оплате: ${totalPrice.toLocaleString('ru-RU')} сум\n` +
+      `👤 Клиент: ${order.client_name}\n` +
+      `📍 Адрес: ${order.client_address || 'Самарканд'} (${order.district || 'Сиёб'})\n` +
+      `💰 К оплате: ${(Number(order.total_price) || 0).toLocaleString('ru-RU')} сум\n` +
       `🚚 Курьер доставки: ${newCourier || 'Любой свободный'}\n` +
       `👤 Сотрудник: ${String(actor_name || 'Мастер цеха').trim()}`;
     sendTelegramNotification(readyTgMsg).catch(e => console.warn('TG ready notify err:', e.message));
   } else if (normalizedStage === 'delivered' && !sentStages.includes('delivered')) {
     if (phone) {
-      const delSms = formatSmsMessage('delivered', { ...existingOrder, courier_name: newCourier, id }, carpets, totalM2, totalPrice);
-      smsResult = await sendEskizSms(phone, delSms, id)
-        .catch(e => console.warn('SMS delivered err:', e.message));
+      const delSms = formatSmsMessage('delivered', { ...order, courier_name: newCourier, id }, order.carpets, order.total_m2, order.total_price);
+      smsResult = await sendEskizSms(phone, delSms, id).catch(e => console.warn('SMS delivered err:', e.message));
       sentStages.push('delivered');
-      await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), id]);
+      order.sms_sent_stages = sentStages.join(',');
     }
   }
 
-  await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
-    [id, actor_name || 'Сотрудник', `Смена статуса: ${existingOrder.stage} -> ${stage}`, new Date().toISOString()]);
+  try {
+    await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
+      [id, actor_name || 'Сотрудник', `Смена статуса: ${oldStage} -> ${stage}`, new Date().toISOString()]);
+  } catch(e) {}
 
-  const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (updatedOrder) {
-    syncOrderToGoogleSheets(updatedOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-  }
+  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
 
-  res.json({ success: true, order: updatedOrder, sms_simulated: Boolean(smsResult?.simulated) });
+  res.json({ success: true, order, sms_simulated: Boolean(smsResult?.simulated) });
 });
 
 // Назначение / Принятие заказа курьером (1 клик)
 app.patch('/api/orders/:id/assign-courier', async (req, res) => {
   const { id } = req.params;
   const { courier_name, actor_name } = req.body;
-  const existingOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (!existingOrder) return res.status(404).json({ error: 'Заказ не найден' });
+  let order = findCachedOrder(id);
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
   const cleanedCourier = cleanCourierName(courier_name);
-  await db.run('UPDATE orders SET courier_name = ? WHERE id = ?', [cleanedCourier, id]);
+  order.courier_name = cleanedCourier;
+  upsertCachedOrder(order);
 
   const actor = actor_name || cleanedCourier || 'Курьер';
-  await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
-    [id, actor, `Назначен курьер: ${cleanedCourier || 'Свободный экипаж'}`, new Date().toISOString()]);
+  try {
+    await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
+      [id, actor, `Назначен курьер: ${cleanedCourier || 'Свободный экипаж'}`, new Date().toISOString()]);
+  } catch (e) {}
 
-  const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (updatedOrder) {
-    syncOrderToGoogleSheets(updatedOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-  }
-  res.json({ success: true, order: updatedOrder, courier_name: cleanedCourier });
+  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  res.json({ success: true, order, courier_name: cleanedCourier });
 });
 
 // Обновление GPS локации и адреса
 app.patch('/api/orders/:id/location', async (req, res) => {
   const { id } = req.params;
   const { gps_location, client_address, district, landmark } = req.body;
-  const existingOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (!existingOrder) return res.status(404).json({ error: 'Заказ не найден' });
+  let order = findCachedOrder(id);
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
-  await db.run(`
-    UPDATE orders 
-    SET gps_location = COALESCE(?, gps_location),
-        client_address = COALESCE(?, client_address),
-        district = COALESCE(?, district),
-        landmark = COALESCE(?, landmark)
-    WHERE id = ?
-  `, [gps_location, client_address, district, landmark, id]);
+  if (gps_location !== undefined) order.gps_location = gps_location;
+  if (client_address !== undefined) order.client_address = client_address;
+  if (district !== undefined) order.district = district;
+  if (landmark !== undefined) order.landmark = landmark;
 
-  // Синхронизация точной GPS точки в профиль клиента
-  if (gps_location && String(gps_location).includes(',') && existingOrder.client_phone) {
+  upsertCachedOrder(order);
+
+  if (gps_location && String(gps_location).includes(',') && order.client_phone) {
     try {
-      await db.run('UPDATE clients SET gps_location = ? WHERE phone = ?', [String(gps_location).trim(), existingOrder.client_phone]);
-    } catch (e) {
-      console.warn('Failed to update client gps in location patch:', e.message);
-    }
+      await db.run('UPDATE clients SET gps_location = ? WHERE phone = ?', [String(gps_location).trim(), order.client_phone]);
+    } catch (e) {}
   }
 
-  const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (updatedOrder) {
-    syncOrderToGoogleSheets(updatedOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-  }
-
-  res.json({ success: true, order: updatedOrder });
+  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  res.json({ success: true, order });
 });
 
 // Мастер цеха: Сохранение замеров изделий & перевод заказа курьеру
@@ -1514,10 +1551,12 @@ app.patch('/api/orders/:id/measurements', async (req, res) => {
     const { id } = req.params;
     const { carpets, washer_name } = req.body;
 
-    const existingOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-    if (!existingOrder) {
-      return res.status(404).json({ error: 'Заказ не найден' });
+    let order = findCachedOrder(id);
+    if (!order) {
+      await syncOrdersFromGoogleSheets(true);
+      order = findCachedOrder(id);
     }
+    if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
     if (!Array.isArray(carpets) || carpets.length === 0) {
       return res.status(400).json({ error: 'Заполните замеры хотя бы одного изделия' });
@@ -1572,87 +1611,48 @@ app.patch('/api/orders/:id/measurements', async (req, res) => {
       };
     });
 
-    // Сохраняем 20% наценку за срочность, если заказ срочный
-    if (existingOrder.urgent) {
+    if (order.urgent) {
       totalPrice = Math.round(totalPrice * 1.2);
     }
 
-    // После замера заказ сразу переходит курьеру как 'ready' (Готов к доставке)
     const targetStage = normalizeStage(req.body.stage || 'ready');
-
-    let assignedCourier = cleanCourierName(existingOrder.courier_name || '');
+    let assignedCourier = cleanCourierName(order.courier_name || '');
     if (req.body.courier_name && String(req.body.courier_name).trim()) {
       assignedCourier = cleanCourierName(req.body.courier_name);
-    } else if (!assignedCourier) {
-      try {
-        const pickupLog = await db.get(`
-          SELECT actor_name FROM audit_logs 
-          WHERE order_id = ? AND (action LIKE '%забор%' OR action LIKE '%Курьер%') 
-          ORDER BY id DESC LIMIT 1
-        `, [id]);
-        if (pickupLog && pickupLog.actor_name && !['Диспетчер', 'Мастер цеха', 'Администратор'].includes(pickupLog.actor_name)) {
-          assignedCourier = pickupLog.actor_name;
-        } else {
-          const defaultCourier = await db.get("SELECT name FROM employees WHERE role = 'courier' AND status = 'active' LIMIT 1");
-          if (defaultCourier && defaultCourier.name) {
-            assignedCourier = defaultCourier.name;
-          }
-        }
-      } catch (e) {
-        // ignore
-      }
     }
 
-    await db.run(`
-      UPDATE orders 
-      SET carpets_json = ?, total_m2 = ?, total_price = ?, washer_name = ?, stage = ?, courier_name = ?
-      WHERE id = ?
-    `, [JSON.stringify(measuredCarpets), +totalM2.toFixed(2), totalPrice, String(washer_name || 'Мастер цеха').trim(), targetStage, assignedCourier || '', id]);
+    order.carpets = measuredCarpets;
+    order.carpets_json = JSON.stringify(measuredCarpets);
+    order.total_m2 = +totalM2.toFixed(2);
+    order.total_price = totalPrice;
+    order.washer_name = String(washer_name || 'Мастер цеха').trim();
+    order.stage = targetStage;
+    order.courier_name = assignedCourier;
 
-    // Синхронизация изменения стоимости в карточку клиента
-    const priceDiff = totalPrice - (existingOrder.total_price || 0);
-    if (priceDiff !== 0 && existingOrder.client_phone) {
-      await db.run('UPDATE clients SET total_spent = total_spent + ? WHERE phone = ?', [priceDiff, existingOrder.client_phone]);
-    }
+    upsertCachedOrder(order);
 
-    await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
-      [id, String(washer_name || 'Мастер цеха').trim(), `Внесены замеры: ${totalM2.toFixed(2)} м², сумма: ${totalPrice.toLocaleString()} сум (этап: ${targetStage}, курьер: ${assignedCourier || 'Не назначен'})`, new Date().toISOString()]);
+    try {
+      await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
+        [id, String(washer_name || 'Мастер цеха').trim(), `Внесены замеры: ${totalM2.toFixed(2)} м², сумма: ${totalPrice.toLocaleString()} сум (этап: ${targetStage}, курьер: ${assignedCourier || 'Не назначен'})`, new Date().toISOString()]);
+    } catch (e) {}
 
-    // Проверяем триггеры SMS из настроек
-    const triggerRow = await db.get("SELECT value FROM settings WHERE key = 'sms_triggers'");
-    let triggers = { created: true, measured: true, ready: true, delivered: true };
-    try { if (triggerRow?.value) triggers = JSON.parse(triggerRow.value); } catch(e) {}
-
-    const sentStages = existingOrder.sms_sent_stages 
-      ? existingOrder.sms_sent_stages.split(',').map(s => s.trim()).filter(Boolean)
-      : [];
-
+    const sentStages = order.sms_sent_stages ? order.sms_sent_stages.split(',').map(s => s.trim()).filter(Boolean) : [];
     let smsResult = null;
-    const phone = existingOrder.client_phone;
+    const phone = order.client_phone;
 
-    if (targetStage === 'ready' && !sentStages.includes('ready') && triggers.ready !== false) {
+    if (targetStage === 'ready' && !sentStages.includes('ready')) {
       if (phone) {
-        const readySms = formatSmsMessage('ready', { ...existingOrder, courier_name: assignedCourier, id }, measuredCarpets, totalM2, totalPrice);
-        smsResult = await sendEskizSms(phone, readySms, id)
-          .catch(e => console.warn('SMS ready err:', e.message));
+        const readySms = formatSmsMessage('ready', { ...order, courier_name: assignedCourier, id }, measuredCarpets, totalM2, totalPrice);
+        smsResult = await sendEskizSms(phone, readySms, id).catch(e => console.warn('SMS ready err:', e.message));
         sentStages.push('ready');
-        await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), id]);
-      }
-    } else if (targetStage === 'in_shop' && !sentStages.includes('measured') && triggers.measured !== false) {
-      if (phone) {
-        const measuredSms = formatSmsMessage('measured', { ...existingOrder, courier_name: assignedCourier, id }, measuredCarpets, totalM2, totalPrice);
-        smsResult = await sendEskizSms(phone, measuredSms, id)
-          .catch(e => console.warn('SMS measured err:', e.message));
-        sentStages.push('measured');
-        await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), id]);
+        order.sms_sent_stages = sentStages.join(',');
       }
     }
 
-    // Telegram-уведомление для экипажей о готовности заказа к доставке
     if (targetStage === 'ready') {
       const readyTgMsg = `🧼 *ЗАКАЗ #${id} ЗАМЕРЕН И ГОТОВ К ДОСТАВКЕ!*\n` +
-        `👤 Клиент: ${existingOrder.client_name}\n` +
-        `📍 Адрес: ${existingOrder.client_address || 'Самарканд'} (${existingOrder.district || 'Сиёб'})\n` +
+        `👤 Клиент: ${order.client_name}\n` +
+        `📍 Адрес: ${order.client_address || 'Самарканд'} (${order.district || 'Сиёб'})\n` +
         `📐 Изделий: ${measuredCarpets.length} шт | Площадь: ${totalM2.toFixed(2)} м²\n` +
         `💰 К оплате: ${totalPrice.toLocaleString('ru-RU')} сум\n` +
         `🚚 Курьер доставки: ${assignedCourier || 'Любой свободный'}\n` +
@@ -1660,10 +1660,7 @@ app.patch('/api/orders/:id/measurements', async (req, res) => {
       sendTelegramNotification(readyTgMsg).catch(e => console.warn('TG ready notify err:', e.message));
     }
 
-    const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-    if (updatedOrder) {
-      syncOrderToGoogleSheets(updatedOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-    }
+    syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
 
     res.json({
       success: true,
@@ -1688,46 +1685,48 @@ app.patch('/api/orders/:id/delivery-complete', async (req, res) => {
     const { id } = req.params;
     const { paid_amount, payment_method, underpaid_reason, courier_name } = req.body;
 
-    const order = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
+    let order = findCachedOrder(id);
     if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
-    const total = order.total_price || 0;
+    const total = Number(order.total_price) || 0;
     const paidAmt = Math.max(0, Number(paid_amount) || 0);
     const isFullyPaid = paidAmt >= total;
     const finalCourier = courier_name || order.courier_name || 'Курьер';
 
-    await db.run(`
-      UPDATE orders 
-      SET stage = 'delivered', paid = ?, paid_amount = ?, payment_method = ?, underpaid_reason = ?, completed_date = ?, courier_name = ?
-      WHERE id = ?
-    `, [isFullyPaid ? 1 : 0, paidAmt, String(payment_method || 'cash').trim(), String(underpaid_reason || '').trim(), new Date().toISOString(), finalCourier, id]);
+    order.stage = 'delivered';
+    order.paid = isFullyPaid;
+    order.paid_amount = paidAmt;
+    order.payment_method = String(payment_method || 'cash').trim();
+    order.underpaid_reason = String(underpaid_reason || '').trim();
+    order.completed_date = new Date().toISOString();
+    order.courier_name = finalCourier;
 
-    // Фиксация в кассе
+    upsertCachedOrder(order);
+
     if (paidAmt > 0) {
-      await db.run('INSERT INTO transactions (id, type, title, amount, date, method) VALUES (?, ?, ?, ?, ?, ?)',
-        [`TX-${Date.now()}-${Math.floor(Math.random() * 1000)}`, 'in', `Оплата заказа #${id} (${finalCourier})`, paidAmt, new Date().toLocaleString('ru-RU'), String(payment_method || 'Наличные')]);
+      try {
+        await db.run('INSERT INTO transactions (id, type, title, amount, date, method) VALUES (?, ?, ?, ?, ?, ?)',
+          [`TX-${Date.now()}-${Math.floor(Math.random() * 1000)}`, 'in', `Оплата заказа #${id} (${finalCourier})`, paidAmt, new Date().toLocaleString('ru-RU'), String(payment_method || 'Наличные')]);
+      } catch (e) {}
     }
 
-    await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
-      [id, String(finalCourier).trim(), `Доставка завершена. Оплачено: ${paidAmt.toLocaleString()} сум (${payment_method || 'cash'})`, new Date().toISOString()]);
+    try {
+      await db.run('INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)',
+        [id, String(finalCourier).trim(), `Доставка завершена. Оплачено: ${paidAmt.toLocaleString()} сум (${payment_method || 'cash'})`, new Date().toISOString()]);
+    } catch (e) {}
 
-    // Триггер SMS о завершении доставки
     const sentStages = String(order.sms_sent_stages || '').split(',');
     if (!sentStages.includes('delivered')) {
       const phone = order.client_phone;
       if (phone) {
         const delSms = formatSmsMessage('delivered', { ...order, courier_name: finalCourier, id }, null, order.total_m2, total);
-        sendEskizSms(phone, delSms, id)
-          .catch(e => console.warn('SMS delivered err:', e.message));
+        sendEskizSms(phone, delSms, id).catch(e => console.warn('SMS delivered err:', e.message));
         sentStages.push('delivered');
-        await db.run('UPDATE orders SET sms_sent_stages = ? WHERE id = ?', [sentStages.join(','), id]);
+        order.sms_sent_stages = sentStages.join(',');
       }
     }
 
-    const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-    if (updatedOrder) {
-      syncOrderToGoogleSheets(updatedOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-    }
+    syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
 
     res.json({ success: true, fully_paid: isFullyPaid, remaining_debt: Math.max(0, total - paidAmt) });
   } catch (err) {
@@ -1739,44 +1738,64 @@ app.patch('/api/orders/:id/delivery-complete', async (req, res) => {
 app.delete('/api/orders/:id', async (req, res) => {
   const { id } = req.params;
   const { reason, deleted_by } = req.body || {};
-  const deletedAt = new Date().toISOString();
-  const result = await db.run(`
-    UPDATE orders 
-    SET is_deleted = 1, deleted_at = ?, deleted_by = ?, delete_reason = ? 
-    WHERE id = ?
-  `, [deletedAt, deleted_by || 'Администратор', reason || 'Удален пользователем', id]);
+  let order = findCachedOrder(id);
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
+
+  order.is_deleted = true;
+  order.deleted_at = new Date().toISOString();
+  order.deleted_by = deleted_by || 'Администратор';
+  order.delete_reason = reason || 'Удален пользователем';
+
+  upsertCachedOrder(order);
 
   syncOrderToGoogleSheets({ id, delete_reason: reason || 'Удален пользователем' }, 'delete')
     .catch(e => console.warn('Sheets sync delete err:', e.message));
 
-  res.json({ success: true, id, changes: result.changes });
+  res.json({ success: true, id });
 });
 
 app.post('/api/orders/:id/restore', async (req, res) => {
   const { id } = req.params;
-  await db.run('UPDATE orders SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, delete_reason = NULL WHERE id = ?', [id]);
-  const restoredOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
-  if (restoredOrder) {
-    syncOrderToGoogleSheets(restoredOrder, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
-  }
+  let order = findCachedOrder(id);
+  if (!order) return res.status(404).json({ error: 'Заказ не найден' });
+
+  order.is_deleted = false;
+  order.deleted_at = null;
+  order.deleted_by = null;
+  order.delete_reason = null;
+
+  upsertCachedOrder(order);
+
+  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
   res.json({ success: true });
 });
 
 app.delete('/api/orders/:id/permanent', async (req, res) => {
   const { id } = req.params;
-  await db.run('DELETE FROM orders WHERE id = ?', [id]);
+  removeCachedOrder(id);
+  syncOrderToGoogleSheets({ id, delete_reason: 'Удален навсегда' }, 'delete').catch(() => {});
   res.json({ success: true });
 });
 
 app.post('/api/orders/trash/clear', async (req, res) => {
-  await db.run('DELETE FROM orders WHERE is_deleted = 1');
+  const trashed = ordersMemory.filter(o => o.is_deleted);
+  ordersMemory = ordersMemory.filter(o => !o.is_deleted);
+  trashed.forEach(t => {
+    syncOrderToGoogleSheets({ id: t.id, delete_reason: 'Очистка корзины' }, 'delete').catch(() => {});
+  });
   res.json({ success: true });
 });
 
 app.post('/api/orders/:id/review', async (req, res) => {
   const { id } = req.params;
   const { rating, review_text } = req.body;
-  await db.run('UPDATE orders SET rating = ?, review_text = ? WHERE id = ?', [Number(rating) || 5, String(review_text || '').trim(), id]);
+  let order = findCachedOrder(id);
+  if (order) {
+    order.rating = Number(rating) || 5;
+    order.review_text = String(review_text || '').trim();
+    upsertCachedOrder(order);
+    syncOrderToGoogleSheets(order, 'upsert').catch(() => {});
+  }
   res.json({ success: true });
 });
 
@@ -1784,11 +1803,13 @@ app.post('/api/orders/:id/review', async (req, res) => {
 app.get('/api/orders/:id/photos', async (req, res) => {
   try {
     const { id } = req.params;
-    const order = await db.get('SELECT photos_json FROM orders WHERE id = ?', [id]);
+    let order = findCachedOrder(id);
+    if (!order) {
+      await syncOrdersFromGoogleSheets(true);
+      order = findCachedOrder(id);
+    }
     if (!order) return res.status(404).json({ error: 'Заказ не найден' });
-    let photos = [];
-    try { photos = JSON.parse(order.photos_json || '[]'); } catch (e) { photos = []; }
-    res.json({ photos });
+    res.json({ photos: order.photos || [] });
   } catch (err) {
     res.status(500).json({ error: 'Ошибка получения фото: ' + err.message });
   }
@@ -1802,7 +1823,11 @@ app.post('/api/orders/:id/photos', async (req, res) => {
       return res.status(400).json({ error: 'Изображение не передано' });
     }
 
-    const order = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
+    let order = findCachedOrder(id);
+    if (!order) {
+      await syncOrdersFromGoogleSheets(true);
+      order = findCachedOrder(id);
+    }
     if (!order) {
       return res.status(404).json({ error: 'Заказ не найден' });
     }
@@ -1836,12 +1861,7 @@ app.post('/api/orders/:id/photos', async (req, res) => {
       photoUrl = photo;
     }
 
-    let photosList = [];
-    try {
-      photosList = JSON.parse(order.photos_json || '[]');
-    } catch (e) {
-      photosList = [];
-    }
+    let photosList = Array.isArray(order.photos) ? order.photos : [];
 
     const newPhotoObj = {
       id: photoId,
@@ -1854,17 +1874,16 @@ app.post('/api/orders/:id/photos', async (req, res) => {
     };
 
     photosList.unshift(newPhotoObj);
-
-    await db.run('UPDATE orders SET photos_json = ? WHERE id = ?', [JSON.stringify(photosList), id]);
+    order.photos = photosList;
+    order.photos_json = JSON.stringify(photosList);
+    upsertCachedOrder(order);
 
     try {
       await db.run(`
-        INSERT INTO audit_logs (order_id, user_name, action, details, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-      `, [id, author, 'upload_photo', `Добавлено фото (${stageLabel}): ${cleanCaption || 'без описания'}`, new Date().toISOString()]);
-    } catch (auditErr) {
-      console.warn('Audit log notice on upload photo:', auditErr.message);
-    }
+        INSERT INTO audit_logs (order_id, actor_name, action, created_at)
+        VALUES (?, ?, ?, ?)
+      `, [id, author, `Добавлено фото (${stageLabel}): ${cleanCaption || 'без описания'}`, new Date().toISOString()]);
+    } catch (auditErr) {}
 
     res.json({ success: true, photo: newPhotoObj, photos: photosList });
   } catch (err) {
@@ -1877,16 +1896,16 @@ app.delete('/api/orders/:id/photos/:photoId', async (req, res) => {
   try {
     const { id, photoId } = req.params;
     const { deleted_by } = req.body || {};
-    const order = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
+    let order = findCachedOrder(id);
     if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
-    let photosList = [];
-    try { photosList = JSON.parse(order.photos_json || '[]'); } catch (e) { photosList = []; }
-
+    let photosList = Array.isArray(order.photos) ? order.photos : [];
     const photoToDelete = photosList.find(p => p.id === photoId);
     photosList = photosList.filter(p => p.id !== photoId);
 
-    await db.run('UPDATE orders SET photos_json = ? WHERE id = ?', [JSON.stringify(photosList), id]);
+    order.photos = photosList;
+    order.photos_json = JSON.stringify(photosList);
+    upsertCachedOrder(order);
 
     if (photoToDelete && photoToDelete.url && photoToDelete.url.startsWith('/uploads/photos/')) {
       try {
@@ -1894,16 +1913,14 @@ app.delete('/api/orders/:id/photos/:photoId', async (req, res) => {
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
         }
-      } catch (unlinkErr) {
-        console.warn('Photo unlink notice:', unlinkErr.message);
-      }
+      } catch (unlinkErr) {}
     }
 
     try {
       await db.run(`
-        INSERT INTO audit_logs (order_id, user_name, action, details, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-      `, [id, deleted_by || 'Сотрудник', 'delete_photo', `Удалено фото (${photoToDelete?.caption || photoId})`, new Date().toISOString()]);
+        INSERT INTO audit_logs (order_id, actor_name, action, created_at)
+        VALUES (?, ?, ?, ?)
+      `, [id, deleted_by || 'Сотрудник', `Удалено фото (${photoToDelete?.caption || photoId})`, new Date().toISOString()]);
     } catch (e) {}
 
     res.json({ success: true, photos: photosList });
@@ -1972,7 +1989,7 @@ app.delete('/api/clients/:id', async (req, res) => {
 
 // 7. Финансы, Авансы и Долги клиентов
 app.get('/api/finance/overview', async (req, res) => {
-  const orders = await db.all('SELECT total_price, paid, paid_amount, stage FROM orders WHERE is_deleted = 0');
+  const orders = ordersMemory.filter(o => !o.is_deleted);
   const advancesRow = await db.get('SELECT SUM(amount) as total FROM salary_advances');
   const advances = advancesRow?.total || 0;
   const empRow = await db.get("SELECT SUM(base_salary) as total FROM employees WHERE status = 'active'");
@@ -1983,11 +2000,12 @@ app.get('/api/finance/overview', async (req, res) => {
   let clientDebts = 0;
 
   orders.forEach(o => {
-    totalRevenue += o.total_price;
-    const paid = o.paid ? o.total_price : (o.paid_amount || 0);
+    const tPrice = Number(o.total_price) || 0;
+    totalRevenue += tPrice;
+    const paid = o.paid ? tPrice : (Number(o.paid_amount) || 0);
     paidRevenue += paid;
-    if (paid < o.total_price && o.stage !== 'cancelled') {
-      clientDebts += (o.total_price - paid);
+    if (paid < tPrice && o.stage !== 'cancelled') {
+      clientDebts += (tPrice - paid);
     }
   });
 
@@ -1998,6 +2016,48 @@ app.get('/api/finance/overview', async (req, res) => {
     totalSalaries: employees,
     paidAdvances: advances,
     cashInRegister: Math.max(0, paidRevenue - advances)
+  });
+});
+
+app.get('/api/stats', (req, res) => {
+  const activeOrders = ordersMemory.filter(o => !o.is_deleted);
+  const stageCounts = {
+    pickup: 0,
+    in_shop: 0,
+    washing: 0,
+    drying: 0,
+    delivery: 0,
+    completed: 0,
+    cancelled: 0
+  };
+  let totalRevenue = 0;
+  let paidRevenue = 0;
+  let clientDebts = 0;
+  let totalM2 = 0;
+
+  activeOrders.forEach(o => {
+    const st = o.stage || 'pickup';
+    if (stageCounts[st] !== undefined) stageCounts[st]++;
+    else stageCounts[st] = (stageCounts[st] || 0) + 1;
+
+    const tPrice = Number(o.total_price) || 0;
+    totalRevenue += tPrice;
+    const paid = o.paid ? tPrice : (Number(o.paid_amount) || 0);
+    paidRevenue += paid;
+    if (paid < tPrice && o.stage !== 'cancelled') {
+      clientDebts += (tPrice - paid);
+    }
+    totalM2 += Number(o.total_m2) || 0;
+  });
+
+  res.json({
+    total_orders: activeOrders.length,
+    total_m2: +totalM2.toFixed(2),
+    total_revenue: totalRevenue,
+    paid_revenue: paidRevenue,
+    client_debts: clientDebts,
+    stages: stageCounts,
+    last_sheets_sync: lastSheetsSyncTime ? new Date(lastSheetsSyncTime).toISOString() : null
   });
 });
 
@@ -2030,17 +2090,21 @@ app.post('/api/finance/advances', async (req, res) => {
 });
 
 app.get('/api/finance/debts', async (req, res) => {
-  const rows = await db.all(`
-    SELECT id, client_name, client_phone, client_address, total_price, paid_amount, underpaid_reason, delivery_date, courier_name
-    FROM orders 
-    WHERE is_deleted = 0 AND (paid = 0 OR paid_amount < total_price) AND stage != 'cancelled'
-    ORDER BY id DESC
-  `);
-
-  const debts = rows.map(r => ({
-    ...r,
-    debt_amount: r.total_price - (r.paid_amount || 0)
-  })).filter(r => r.debt_amount > 0);
+  const debts = ordersMemory
+    .filter(o => !o.is_deleted && (!o.paid || Number(o.paid_amount || 0) < Number(o.total_price || 0)) && o.stage !== 'cancelled')
+    .map(o => ({
+      id: o.id,
+      client_name: o.client_name,
+      client_phone: o.client_phone,
+      client_address: o.client_address,
+      total_price: Number(o.total_price) || 0,
+      paid_amount: Number(o.paid_amount) || 0,
+      underpaid_reason: o.underpaid_reason || '',
+      delivery_date: o.delivery_date || '',
+      courier_name: o.courier_name || '',
+      debt_amount: Math.max(0, (Number(o.total_price) || 0) - (Number(o.paid_amount) || 0))
+    }))
+    .filter(o => o.debt_amount > 0);
 
   res.json(debts);
 });
@@ -2052,31 +2116,37 @@ app.post('/api/finance/debts/pay', async (req, res) => {
     return res.status(400).json({ error: 'Укажите номер заказа и корректную положительную сумму доплаты' });
   }
 
-  const order = await db.get('SELECT total_price, paid_amount FROM orders WHERE id = ?', [order_id]);
+  let order = findCachedOrder(order_id);
   if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
+  const total = Number(order.total_price) || 0;
   const currentPaid = Number(order.paid_amount) || 0;
-  const remainingDebt = Math.max(0, order.total_price - currentPaid);
+  const remainingDebt = Math.max(0, total - currentPaid);
   if (numAmount > remainingDebt) {
     return res.status(400).json({ error: `Сумма доплаты превышает остаток долга (${remainingDebt.toLocaleString()} сум)` });
   }
 
   const newPaid = currentPaid + numAmount;
-  const isFullyPaid = newPaid >= order.total_price;
+  const isFullyPaid = newPaid >= total;
 
-  await db.run(`
-    UPDATE orders 
-    SET paid = ?, paid_amount = ?, underpaid_reason = CASE WHEN ? = 1 THEN '' ELSE underpaid_reason END
-    WHERE id = ?
-  `, [isFullyPaid ? 1 : 0, newPaid, isFullyPaid ? 1 : 0, order_id]);
+  order.paid = isFullyPaid;
+  order.paid_amount = newPaid;
+  if (isFullyPaid) order.underpaid_reason = '';
+  upsertCachedOrder(order);
 
-  await db.run(`
-    INSERT INTO transactions (id, type, title, amount, date, method) VALUES (?, ?, ?, ?, ?, ?)
-  `, [`TX-${Date.now().toString().slice(-5)}`, 'in', `Погашение долга по заказу #${order_id}`, numAmount, new Date().toLocaleString('ru-RU'), String(method || 'Наличные').trim()]);
+  try {
+    await db.run(`
+      INSERT INTO transactions (id, type, title, amount, date, method) VALUES (?, ?, ?, ?, ?, ?)
+    `, [`TX-${Date.now().toString().slice(-5)}`, 'in', `Погашение долга по заказу #${order_id}`, numAmount, new Date().toLocaleString('ru-RU'), String(method || 'Наличные').trim()]);
+  } catch (e) {}
 
-  await db.run(`
-    INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)
-  `, [order_id, 'Бухгалтерия / Касса', `Погашение долга: +${numAmount.toLocaleString()} сум (${method || 'Наличные'})`, new Date().toISOString()]);
+  try {
+    await db.run(`
+      INSERT INTO audit_logs (order_id, actor_name, action, created_at) VALUES (?, ?, ?, ?)
+    `, [order_id, 'Бухгалтерия / Касса', `Погашение долга: +${numAmount.toLocaleString()} сум (${method || 'Наличные'})`, new Date().toISOString()]);
+  } catch (e) {}
+
+  syncOrderToGoogleSheets(order, 'upsert').catch(() => {});
 
   res.json({ success: true, new_paid: newPaid, fully_paid: isFullyPaid });
 });
@@ -2090,19 +2160,17 @@ app.get('/api/finance/courier-shift', async (req, res) => {
     const shiftDate = date || new Date().toISOString().slice(0, 10);
     const dateFormattedRu = shiftDate.split('-').reverse().join('.');
 
-    // Все заказы курьера на доставку со стадией delivered
-    const orders = await db.all(`
-      SELECT id, client_name, client_phone, client_address, total_price, paid_amount, payment_method, underpaid_reason, delivery_date, completed_date
-      FROM orders 
-      WHERE courier_name = ? 
-        AND is_deleted = 0 
-        AND stage = 'delivered'
-        AND (
-          delivery_date = ? OR delivery_date = ? OR
-          completed_date LIKE ? OR completed_date LIKE ? OR
-          created_at LIKE ?
-        )
-    `, [courier_name, shiftDate, dateFormattedRu, `%${shiftDate}%`, `%${dateFormattedRu}%`, `%${dateFormattedRu}%`]);
+    // Все заказы курьера на доставку со стадией delivered из кэша Google Таблиц
+    const orders = ordersMemory.filter(o =>
+      o.courier_name === courier_name &&
+      !o.is_deleted &&
+      o.stage === 'delivered' &&
+      (
+        o.delivery_date === shiftDate || o.delivery_date === dateFormattedRu ||
+        (o.completed_date && (o.completed_date.includes(shiftDate) || o.completed_date.includes(dateFormattedRu))) ||
+        (o.created_at && o.created_at.includes(dateFormattedRu))
+      )
+    );
 
     let totalOrders = orders.length;
     let totalDeliveredSum = 0;
@@ -2258,13 +2326,14 @@ app.post('/api/telegram/broadcast', async (req, res) => {
 
 app.post('/api/telegram/notify-order', async (req, res) => {
   const { orderId } = req.body;
-  const order = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]);
+  let order = findCachedOrder(orderId);
   if (!order) return res.status(404).json({ error: 'Заказ не найден' });
 
   const cardText = formatTelegramOrderCard(order);
   const result = await sendTelegramNotification(cardText);
   if (result.success) {
-    await db.run('UPDATE orders SET tg_sent = 1 WHERE id = ?', [orderId]);
+    order.tg_sent = 1;
+    upsertCachedOrder(order);
   }
   res.json({ success: result.success, text: cardText, error: result.error });
 });
@@ -2445,14 +2514,16 @@ app.post('/api/integrations/google-sheets/sync-all', async (req, res) => {
 
 app.post('/api/integrations/google-sheets/pull', async (req, res) => {
   await syncOrdersFromGoogleSheets(true);
-  const countRow = await db.get('SELECT COUNT(*) as count FROM orders WHERE is_deleted = 0');
-  res.json({ success: true, count: countRow?.count || 0 });
+  const activeCount = ordersMemory.filter(o => !o.is_deleted).length;
+  res.json({ success: true, count: activeCount });
 });
 
-// Статус базы данных (Turso Cloud vs Local SQLite)
+// Статус базы данных (Google Sheets Primary)
 app.get('/api/db/status', (req, res) => {
   res.json({
-    mode: dbMode,
+    mode: 'google_sheets_primary',
+    orders_source: 'Google Sheets (Cosmo)',
+    local_db: dbMode,
     isTurso,
     isVercel,
     location: dbLocation ? (dbLocation.startsWith('libsql://') ? dbLocation.replace(/(:\/\/)(.*)(@)/, '$1***$3') : path.basename(dbLocation)) : 'unknown'
@@ -2508,7 +2579,7 @@ app.post('/api/settings', async (req, res) => {
 app.get('/api/backup/export', async (req, res) => {
   const employees = await db.all('SELECT id, name, role, phone, base_salary, status FROM employees');
   const services = await db.all('SELECT * FROM services');
-  const orders = await db.all('SELECT * FROM orders');
+  const orders = ordersMemory;
   const clients = await db.all('SELECT * FROM clients');
   const salary_advances = await db.all('SELECT * FROM salary_advances');
   const transactions = await db.all('SELECT * FROM transactions');
@@ -2561,29 +2632,12 @@ app.post('/api/backup/import', async (req, res) => {
     }
 
     if (Array.isArray(data.orders)) {
-      for (const o of data.orders) {
-        if (o && o.id) {
-          await db.run(`
-            INSERT OR REPLACE INTO orders (
-              id, client_name, client_phone, client_address, district, landmark, language, time_slot, urgent,
-              created_at, pickup_date, delivery_date, delivery_time, stage, courier_name, washer_name, dispatcher_name,
-              paid, paid_amount, payment_method, underpaid_reason, total_m2, total_price, carpets_json, extras_json,
-              notes, is_deleted, deleted_at, deleted_by, delete_reason, rating, review_text, completed_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, [
-            String(o.id), String(o.client_name || ''), String(o.client_phone || ''), String(o.client_address || ''),
-            String(o.district || 'Сиёб'), String(o.landmark || ''), String(o.language || 'Русский'), String(o.time_slot || 'В любое время'),
-            o.urgent ? 1 : 0, String(o.created_at || ''), String(o.pickup_date || ''), String(o.delivery_date || ''),
-            String(o.delivery_time || ''), String(o.stage || 'pickup'), String(o.courier_name || ''), String(o.washer_name || ''),
-            String(o.dispatcher_name || ''), o.paid ? 1 : 0, Number(o.paid_amount) || 0, String(o.payment_method || 'cash'),
-            String(o.underpaid_reason || ''), Number(o.total_m2) || 0, Number(o.total_price) || 0,
-            typeof o.carpets_json === 'string' ? o.carpets_json : JSON.stringify(o.carpets || []),
-            typeof o.extras_json === 'string' ? o.extras_json : JSON.stringify(o.extras || []),
-            String(o.notes || ''), o.is_deleted ? 1 : 0, o.deleted_at || null, o.deleted_by || null, o.delete_reason || null,
-            Number(o.rating) || 0, String(o.review_text || ''), o.completed_date || null
-          ]);
-        }
-      }
+      ordersMemory = data.orders.map(o => ({
+        ...o,
+        stage: normalizeStage(o.stage || 'pickup'),
+        is_deleted: Boolean(o.is_deleted)
+      }));
+      syncAllOrdersToGoogleSheets().catch(() => {});
     }
 
     res.json({ success: true });
