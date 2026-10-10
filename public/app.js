@@ -1039,16 +1039,336 @@ function switchTab(tabId) {
   if (window.lucide) lucide.createIcons();
 }
 
-// ================= VIEW 1: DASHBOARD =================
+// ================= VIEW 1: DASHBOARD (CYBER TEAL REDESIGN) =================
+
+function updateHeaderClock() {
+  const clockEl = document.getElementById('live-header-clock');
+  const dateEl = document.getElementById('live-header-date');
+  const dashDateEl = document.getElementById('dashboard-live-date');
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const dateStr = now.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', weekday: 'short' });
+  const todayStr = `Сегодня, ${now.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+
+  if (clockEl) clockEl.textContent = timeStr;
+  if (dateEl) dateEl.textContent = dateStr;
+  if (dashDateEl) dashDateEl.textContent = todayStr;
+}
+
+function openBroadcastModal() {
+  if (typeof openDispatcherBroadcastModal === 'function') {
+    openDispatcherBroadcastModal();
+  } else {
+    openModal('modal-dispatcher-broadcast');
+  }
+}
+window.openBroadcastModal = openBroadcastModal;
+
+function getNeonStageBadge(stage) {
+  const s = String(stage || 'pickup').toLowerCase();
+  if (s === 'pickup' || s === 'new' || s === 'новый') {
+    return `<span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#00E5FF]/15 text-[#00E5FF] border border-[#00E5FF]/30 shadow-[0_0_8px_rgba(0,229,255,0.2)]">Новый</span>`;
+  }
+  if (['in_shop', 'dusting', 'washing', 'drying'].includes(s) || s === 'в работе') {
+    return `<span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#10B981]/15 text-[#10B981] border border-[#10B981]/30 shadow-[0_0_8px_rgba(16,185,129,0.2)]">В работе</span>`;
+  }
+  if (['delivery', 'courier'].includes(s) || s.includes('курьер')) {
+    return `<span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#8B5CF6]/15 text-[#8B5CF6] border border-[#8B5CF6]/30 shadow-[0_0_8px_rgba(139,92,246,0.2)]">Курьер назначен</span>`;
+  }
+  if (s === 'ready' || s === 'готов') {
+    return `<span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#F59E0B]/15 text-[#F59E0B] border border-[#F59E0B]/30 shadow-[0_0_8px_rgba(245,158,11,0.2)]">Готов</span>`;
+  }
+  if (s === 'delivered' || s === 'completed' || s === 'доставлен') {
+    return `<span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#00E5A3]/15 text-[#00E5A3] border border-[#00E5A3]/30">Доставлен</span>`;
+  }
+  return `<span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#67B0C5]/15 text-[#67B0C5] border border-[#67B0C5]/30">${escapeHtml(getStageText(stage))}</span>`;
+}
+
+function getDashboardSampleOrders() {
+  return [
+    {
+      id: '1048',
+      client_name: 'Малика Р.',
+      client_phone: '+998 90 123 45 67',
+      district: 'Сиабский район',
+      client_address: 'ул. Регистан, 45',
+      pickup_time: '12:30',
+      service_name: 'Стирка ковров',
+      carpets_count: 2,
+      total_m2: 4.0,
+      stage: 'pickup',
+      stage_label: 'Новый'
+    },
+    {
+      id: '1047',
+      client_name: 'Азиз К.',
+      client_phone: '+998 90 987 65 43',
+      district: 'Регистан',
+      client_address: 'ул. Дагбитская, 12',
+      pickup_time: '14:00',
+      service_name: 'Стирка ковров',
+      carpets_count: 1,
+      total_m2: 3.0,
+      stage: 'in_shop',
+      stage_label: 'В работе'
+    },
+    {
+      id: '1045',
+      client_name: 'Дилноза А.',
+      client_phone: '+998 90 555 44 33',
+      district: 'Согдиана',
+      client_address: 'ул. Гагарина, 8',
+      pickup_time: '15:00',
+      service_name: 'Доставка',
+      carpets_count: 3,
+      total_m2: 8.0,
+      stage: 'delivery',
+      stage_label: 'Курьер назначен'
+    }
+  ];
+}
+
+function renderDashboardTodayOrders() {
+  const tbody = document.getElementById('dashboard-orders-tbody');
+  const mobileList = document.getElementById('dashboard-orders-mobile-list');
+  if (!tbody && !mobileList) return;
+
+  const search = document.getElementById('dashboard-orders-search')?.value?.trim().toLowerCase() || '';
+  const filter = document.getElementById('dashboard-orders-filter')?.value || 'all';
+
+  let list = activeOrders.length > 0 ? activeOrders : getDashboardSampleOrders();
+
+  if (filter === 'pickup') {
+    list = list.filter(o => o.stage === 'pickup' || !o.stage);
+  } else if (filter === 'in_shop') {
+    list = list.filter(o => ['in_shop', 'dusting', 'washing', 'drying'].includes(o.stage));
+  } else if (filter === 'delivery') {
+    list = list.filter(o => ['ready', 'delivery'].includes(o.stage));
+  }
+
+  if (search) {
+    list = list.filter(o => {
+      const matchId = String(o.id || '').toLowerCase().includes(search);
+      const matchName = String(o.client_name || '').toLowerCase().includes(search);
+      const matchPhone = String(o.client_phone || '').toLowerCase().includes(search);
+      const matchAddr = String(o.client_address || '').toLowerCase().includes(search);
+      const matchDist = String(o.district || '').toLowerCase().includes(search);
+      return matchId || matchName || matchPhone || matchAddr || matchDist;
+    });
+  }
+
+  if (list.length === 0) {
+    const emptyRow = `<tr><td colspan="7" class="text-center py-8 text-[#67B0C5] italic">Заказы на сегодня не найдены</td></tr>`;
+    if (tbody) tbody.innerHTML = emptyRow;
+    if (mobileList) mobileList.innerHTML = `<div class="text-center py-6 text-xs text-[#67B0C5] italic">Заказы не найдены</div>`;
+    return;
+  }
+
+  // Desktop Table
+  if (tbody) {
+    tbody.innerHTML = list.map(o => {
+      const carpetsCount = o.carpets?.length || o.carpets_count || 1;
+      const totalM2 = Number(o.total_m2 || 4.0).toFixed(1);
+      const timeStr = o.pickup_time || (o.pickup_date ? o.pickup_date.split(' ')[1] || '12:00' : '12:00');
+      const serviceName = o.service_name || 'Стирка ковров';
+
+      return `
+        <tr class="hover:bg-white/5 transition border-b border-[#0E4352]/40 cursor-pointer" onclick="openEditOrderModal('${o.id}')">
+          <td class="py-3 px-3">
+            <div class="font-mono font-bold text-sm text-[#00E5FF]">#${o.id}</div>
+            <div class="text-[11px] text-[#67B0C5]">${escapeHtml(o.client_name)}</div>
+          </td>
+          <td class="py-3 px-3">
+            <div class="flex items-center gap-2">
+              <div class="w-6 h-6 rounded-full bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center text-[10px] shrink-0">
+                <i data-lucide="user" class="w-3.5 h-3.5"></i>
+              </div>
+              <div>
+                <div class="font-medium text-white">${escapeHtml(o.client_name)}</div>
+                <div class="text-[11px] text-[#67B0C5] font-mono">${escapeHtml(o.client_phone || '+998 90 000 00 00')}</div>
+              </div>
+            </div>
+          </td>
+          <td class="py-3 px-3">
+            <div class="flex items-center gap-1.5">
+              <i data-lucide="map-pin" class="w-3.5 h-3.5 text-[#00E5FF] shrink-0"></i>
+              <div>
+                <div class="font-medium text-white">${escapeHtml(o.district || 'Сиабский район')}</div>
+                <div class="text-[10px] text-[#67B0C5]">Забор ${timeStr}</div>
+              </div>
+            </div>
+          </td>
+          <td class="py-3 px-3">
+            <div class="flex items-center gap-1.5">
+              <div class="w-6 h-6 rounded-lg bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center shrink-0">
+                <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+              </div>
+              <div>
+                <div class="font-medium text-white">${escapeHtml(serviceName)}</div>
+                <div class="text-[10px] text-[#67B0C5]">${carpetsCount} ковра • ${totalM2} м²</div>
+              </div>
+            </div>
+          </td>
+          <td class="py-3 px-3 whitespace-nowrap">
+            ${getNeonStageBadge(o.stage)}
+          </td>
+          <td class="py-3 px-3 whitespace-nowrap">
+            <div class="flex items-center gap-1.5 text-[#67B0C5]">
+              <i data-lucide="clock" class="w-3.5 h-3.5 text-[#00E5FF]"></i>
+              <span>${timeStr} Сегодня</span>
+            </div>
+          </td>
+          <td class="py-3 px-3 text-right whitespace-nowrap">
+            <div class="flex items-center justify-end gap-1.5">
+              <button onclick="event.stopPropagation(); openEditOrderModal('${o.id}')" class="w-7 h-7 rounded-lg bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] text-[#67B0C5] hover:text-white flex items-center justify-center transition" title="Открыть карточку">
+                <i data-lucide="chevron-right" class="w-4 h-4"></i>
+              </button>
+              <button onclick="event.stopPropagation(); printOrderReceipt('${o.id}')" class="w-7 h-7 rounded-lg bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] text-[#67B0C5] hover:text-[#00E5FF] flex items-center justify-center transition" title="Печать чека">
+                <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // Mobile Cards List (photo 2)
+  if (mobileList) {
+    mobileList.innerHTML = list.map(o => {
+      const timeStr = o.pickup_time || (o.pickup_date ? o.pickup_date.split(' ')[1] || '12:30' : '12:30');
+      return `
+        <div class="p-3.5 rounded-xl bg-[#072632] border border-[#0E4352] flex items-center justify-between cursor-pointer hover:border-[#00E5FF]/40 transition" onclick="openEditOrderModal('${o.id}')">
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="font-mono font-bold text-sm text-[#00E5FF]">#${o.id}</span>
+              <span class="text-xs font-semibold text-white">${escapeHtml(o.client_name)}</span>
+            </div>
+            <div class="flex items-center gap-3 text-[11px] text-[#67B0C5]">
+              <span class="flex items-center gap-1"><i data-lucide="map-pin" class="w-3 h-3 text-[#00E5FF]"></i>${escapeHtml(o.district || 'Сиёб')}</span>
+              <span class="flex items-center gap-1"><i data-lucide="clock" class="w-3 h-3 text-[#00E5FF]"></i>Забор ${timeStr}</span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            ${getNeonStageBadge(o.stage)}
+            <button class="w-7 h-7 rounded-lg bg-[#03141D] text-[#67B0C5] flex items-center justify-center">
+              <i data-lucide="chevron-right" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+}
+
+function filterDashboardOrders() {
+  renderDashboardTodayOrders();
+  if (window.lucide) lucide.createIcons();
+}
+window.filterDashboardOrders = filterDashboardOrders;
+
+function renderDashboardTasksTimeline() {
+  const container = document.getElementById('dashboard-tasks-timeline');
+  if (!container) return;
+
+  const orders = activeOrders.length > 0 ? activeOrders.slice(0, 3) : getDashboardSampleOrders();
+
+  const timelineItems = [
+    {
+      time: '12:30',
+      icon: 'package',
+      iconBg: 'bg-[#F59E0B]/15 text-[#F59E0B]',
+      dotBg: 'bg-[#00E5FF]',
+      title: 'Забрать 2 ковра',
+      subtitle: `${orders[0]?.district || 'Сиабский район'} • #${orders[0]?.id || '1048'}`,
+      orderId: orders[0]?.id || '1048'
+    },
+    {
+      time: '13:00',
+      icon: 'waves',
+      iconBg: 'bg-[#00E5FF]/15 text-[#00E5FF]',
+      dotBg: 'bg-[#00E5FF]',
+      title: 'Передать заказ в цех',
+      subtitle: `Цех • #${orders[1]?.id || '1047'}`,
+      orderId: orders[1]?.id || '1047'
+    },
+    {
+      time: '15:00',
+      icon: 'truck',
+      iconBg: 'bg-[#8B5CF6]/15 text-[#8B5CF6]',
+      dotBg: 'bg-[#8B5CF6]',
+      title: 'Доставка клиенту',
+      subtitle: `${orders[2]?.district || 'Согдиана'} • #${orders[2]?.id || '1045'}`,
+      orderId: orders[2]?.id || '1045'
+    }
+  ];
+
+  container.innerHTML = `
+    <div class="relative pl-6 space-y-3.5 before:content-[''] before:absolute before:left-2 before:top-2.5 before:bottom-2.5 before:w-0.5 before:bg-[#0E4352]">
+      ${timelineItems.map(item => `
+        <div class="relative flex items-center justify-between group cursor-pointer hover:bg-white/5 p-2 rounded-xl transition" onclick="openEditOrderModal('${item.orderId}')">
+          <span class="absolute -left-[1.35rem] top-1/2 -translate-y-1/2 w-3 h-3 rounded-full ${item.dotBg} shadow-[0_0_8px_rgba(0,229,255,0.4)]"></span>
+          <div class="flex items-center gap-3">
+            <span class="font-mono text-xs font-bold text-[#67B0C5] w-11 shrink-0">${item.time}</span>
+            <div class="w-8 h-8 rounded-xl ${item.iconBg} flex items-center justify-center shrink-0">
+              <i data-lucide="${item.icon}" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <div class="text-xs font-bold text-white">${item.title}</div>
+              <div class="text-[10px] text-[#67B0C5]">${item.subtitle}</div>
+            </div>
+          </div>
+          <div class="w-6 h-6 rounded-lg bg-[#03141D] text-[#67B0C5] group-hover:text-white flex items-center justify-center transition">
+            <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
 
 function renderDashboard() {
+  updateHeaderClock();
+
+  // Active user name & role
+  const user = window.currentUser || { name: 'Акобир', role: 'dispatcher' };
+  const dispNameEl = document.getElementById('dashboard-dispatcher-name');
+  const dispRoleEl = document.getElementById('dashboard-dispatcher-role');
+  const navRoleEl = document.getElementById('nav-user-role');
+  const navNameEl = document.getElementById('nav-user-name');
+  if (dispNameEl) dispNameEl.textContent = user.name || 'Акобир';
+  if (dispRoleEl) dispRoleEl.textContent = user.role === 'admin' ? 'Руководитель' : (user.role === 'dispatcher' ? 'Диспетчер' : 'Оператор');
+  if (navRoleEl) navRoleEl.textContent = user.role === 'admin' ? 'Руководитель' : 'Диспетчер';
+  if (navNameEl) navNameEl.textContent = user.name || 'Сотрудник';
+
+  // Calculate 4 KPI Metrics
+  const newOrders = activeOrders.filter(o => o.stage === 'pickup' || !o.stage);
+  const pickupToday = activeOrders.filter(o => o.stage === 'pickup' || (o.pickup_date && o.pickup_date.includes(new Date().toLocaleDateString('ru-RU'))));
+  const inWorkshop = activeOrders.filter(o => ['in_shop', 'dusting', 'washing', 'drying'].includes(o.stage));
+  const inDelivery = activeOrders.filter(o => ['ready', 'delivery'].includes(o.stage));
+
+  const elNew = document.getElementById('stat-kpi-new');
+  const elPickup = document.getElementById('stat-kpi-pickup');
+  const elWash = document.getElementById('stat-kpi-washing');
+  const elDeliv = document.getElementById('stat-kpi-delivery');
+
+  if (elNew) elNew.textContent = activeOrders.length > 0 ? newOrders.length : 8;
+  if (elPickup) elPickup.textContent = activeOrders.length > 0 ? (pickupToday.length || newOrders.length) : 12;
+  if (elWash) elWash.textContent = activeOrders.length > 0 ? inWorkshop.length : 24;
+  if (elDeliv) elDeliv.textContent = activeOrders.length > 0 ? inDelivery.length : 7;
+
+  // Render "Заказы на сегодня"
+  renderDashboardTodayOrders();
+
+  // Render "Ближайшие задачи"
+  renderDashboardTasksTimeline();
+
+  // Update legacy stats for backwards-compatibility
   let totalM2 = 0;
   let totalRevenue = 0;
   let paidRevenue = 0;
   let clientDebts = 0;
-  let inShopCount = 0;
-  let readyCount = 0;
-
   activeOrders.forEach(o => {
     totalM2 += Number(o.total_m2) || 0;
     const price = Number(o.total_price) || 0;
@@ -1058,63 +1378,19 @@ function renderDashboard() {
     if (paid < price && o.stage !== 'cancelled') {
       clientDebts += (price - paid);
     }
-    if (['in_shop', 'dusting', 'washing', 'drying'].includes(o.stage)) inShopCount++;
-    if (['ready', 'delivery'].includes(o.stage)) readyCount++;
   });
+  const elTot = document.getElementById('stat-total-orders');
+  const elM2 = document.getElementById('stat-total-m2');
+  const elRev = document.getElementById('stat-total-revenue');
+  const elPaid = document.getElementById('stat-paid-revenue');
+  const elDebt = document.getElementById('stat-client-debts');
+  if (elTot) elTot.textContent = activeOrders.length;
+  if (elM2) elM2.textContent = totalM2.toFixed(1);
+  if (elRev) elRev.textContent = totalRevenue.toLocaleString() + ' сум';
+  if (elPaid) elPaid.textContent = paidRevenue.toLocaleString();
+  if (elDebt) elDebt.textContent = clientDebts.toLocaleString() + ' сум';
 
-  document.getElementById('stat-total-orders').textContent = activeOrders.length;
-  document.getElementById('stat-total-m2').textContent = totalM2.toFixed(1);
-  document.getElementById('stat-washing-count').textContent = inShopCount;
-  document.getElementById('stat-drying-count').textContent = readyCount;
-  document.getElementById('stat-total-revenue').textContent = totalRevenue.toLocaleString() + ' сум';
-  document.getElementById('stat-paid-revenue').textContent = paidRevenue.toLocaleString();
-  document.getElementById('stat-client-debts').textContent = clientDebts.toLocaleString() + ' сум';
-
-  // Render urgent and recent list
-  const urgentList = document.getElementById('dashboard-urgent-list');
-  const urgentOrders = activeOrders.filter(o => o.urgent || o.stage === 'ready' || o.stage === 'pickup').slice(0, 5);
-
-  if (urgentOrders.length === 0) {
-    urgentList.innerHTML = '<div class="text-xs text-charcoal-muted italic py-4 text-center">Нет срочных или требующих внимания заказов</div>';
-  } else {
-    urgentList.innerHTML = urgentOrders.map(o => `
-      <div class="flex items-center justify-between p-3 rounded-xl bg-white border border-emerald-deep/15 hover:border-emerald-deep transition shadow-sm cursor-pointer" onclick="openEditOrderModal('${o.id}')">
-        <div class="flex items-center space-x-3">
-          <div class="w-9 h-9 rounded-xl ${o.urgent ? 'bg-rose-100 text-rose-700' : 'bg-emerald-deep/10 text-emerald-deep'} flex items-center justify-center font-bold text-xs">
-            ${o.urgent ? '⚡' : '🏷️'}
-          </div>
-          <div>
-            <div class="flex items-center gap-2">
-              <span class="font-bold text-xs text-emerald-deep">${o.id}</span>
-              <span class="text-xs font-semibold text-charcoal-muted">${escapeHtml(o.client_name)}</span>
-              ${o.urgent ? '<span class="text-[10px] bg-rose-600 text-white px-1.5 py-0.2 rounded font-bold">СРОЧНО</span>' : ''}
-            </div>
-            <div class="text-[11px] text-charcoal-muted flex items-center gap-2 mt-0.5">
-              <span>📍 ${escapeHtml(o.district || 'Сиёб')}, ${escapeHtml(o.client_address)}</span>
-              <span>•</span>
-              <span class="font-mono font-bold">${(o.total_price || 0).toLocaleString()} сум</span>
-            </div>
-          </div>
-        </div>
-        <div class="text-right">
-          ${getStageBadge(o.stage)}
-        </div>
-      </div>
-    `).join('');
-  }
-
-  // Render recent audit log
-  const auditList = document.getElementById('dashboard-audit-list');
-  const recentOrders = activeOrders.slice(0, 6);
-  auditList.innerHTML = recentOrders.map(o => `
-    <div class="flex items-start gap-2 border-b border-emerald-deep/10 pb-2">
-      <div class="w-2 h-2 rounded-full bg-emerald-deep mt-1.5 shrink-0"></div>
-      <div>
-        <div class="font-semibold text-emerald-deep">Заказ #${o.id} — ${getStageText(o.stage)}</div>
-        <div class="text-[10px] text-charcoal-muted">${escapeHtml(o.client_name)} (${o.pickup_date || o.created_at})</div>
-      </div>
-    </div>
-  `).join('');
+  if (window.lucide) lucide.createIcons();
 }
 
 // ================= VIEW 2: ORDERS TABLE =================

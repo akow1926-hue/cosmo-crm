@@ -122,16 +122,16 @@
 
   <style>
     :root {
-      --bg-page: #EBF5F3;
-      --bg-card: #FFFFFF;
-      --bg-subtle: #E2F4F0;
-      --text-main: #04222B;
-      --text-muted: #10606F;
-      --border-color: rgba(29, 139, 148, 0.18);
-      --header-bg: #04222B;
+      --bg-page: #03141D;
+      --bg-card: #072632;
+      --bg-subtle: #0A3542;
+      --text-main: #FFFFFF;
+      --text-muted: #67B0C5;
+      --border-color: #0E4352;
+      --header-bg: #03141D;
       --header-text: #FFFFFF;
-      --badge-accent: #98D8D0;
-      --card-shadow: 0 2px 12px -2px rgba(4, 34, 43, 0.08);
+      --badge-accent: #00E5FF;
+      --card-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.6);
     }
 
     body[data-theme="pure"] {
@@ -147,23 +147,36 @@
       --card-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.06);
     }
 
-    body[data-theme="dark"] {
-      --bg-page: #03171D;
-      --bg-card: #072630;
-      --bg-subtle: #0A3D4A;
-      --text-main: #E2F4F0;
-      --text-muted: #98D8D0;
-      --border-color: rgba(79, 184, 180, 0.22);
-      --header-bg: #021116;
-      --header-text: #4FB8B4;
-      --badge-accent: #4FB8B4;
-      --card-shadow: 0 4px 25px -2px rgba(0, 0, 0, 0.75);
+    body[data-theme="ivory"] {
+      --bg-page: #EBF5F3;
+      --bg-card: #FFFFFF;
+      --bg-subtle: #E2F4F0;
+      --text-main: #04222B;
+      --text-muted: #10606F;
+      --border-color: rgba(29, 139, 148, 0.18);
+      --header-bg: #04222B;
+      --header-text: #FFFFFF;
+      --badge-accent: #98D8D0;
+      --card-shadow: 0 2px 12px -2px rgba(4, 34, 43, 0.08);
+    }
+
+    body[data-theme="dark"], body {
+      --bg-page: #03141D;
+      --bg-card: #072632;
+      --bg-subtle: #0A3542;
+      --text-main: #FFFFFF;
+      --text-muted: #67B0C5;
+      --border-color: #0E4352;
+      --header-bg: #03141D;
+      --header-text: #FFFFFF;
+      --badge-accent: #00E5FF;
+      --card-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.6);
     }
 
     body {
       background-color: var(--bg-page);
       color: var(--text-main);
-      font-family: 'Montserrat', sans-serif;
+      font-family: 'Plus Jakarta Sans', 'Montserrat', sans-serif;
       transition: background-color 0.2s ease, color 0.2s ease;
     }
 
@@ -203,13 +216,14 @@
 
     /* ================= COMPREHENSIVE DARK THEME RULES ================= */
     body[data-theme="dark"] header {
-      background-color: #021116 !important;
-      border-bottom: 2px solid rgba(79, 184, 180, 0.25) !important;
+      background-color: #03141D !important;
+      border-bottom: 1px solid #0E4352 !important;
     }
 
+    body[data-theme="dark"] aside,
     body[data-theme="dark"] nav {
-      background-color: #03171D !important;
-      border-color: rgba(79, 184, 180, 0.15) !important;
+      background-color: #051E27 !important;
+      border-color: #0E4352 !important;
     }
 
     body[data-theme="dark"] .bg-white {
@@ -737,6 +751,7 @@
       max-height: 90vh !important;
       max-height: 90dvh !important;
       overflow-y: auto !important;
+    }
     /* Ensure tab strips and horizontal scroll bars never vertically collapse */
     .overflow-x-auto {
       flex-shrink: 0 !important;
@@ -1109,37 +1124,41 @@
   <div id="app-screen" class="hidden flex-1 flex flex-col h-screen overflow-hidden">
     
     <!-- Top Bar Navigation -->
-    <header class="bg-emerald-deep text-butter border-b-2 border-butter-dark sticky top-0 z-40 shadow-lg px-2 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-1.5 sm:gap-3 overflow-x-hidden">
+    <header class="bg-[#03141D] text-white border-b border-[#0E4352] sticky top-0 z-40 shadow-lg px-2 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between gap-1.5 sm:gap-3 overflow-x-hidden">
       <div class="flex items-center space-x-1.5 sm:space-x-3 shrink-0">
-        <!-- Sidebar Toggle Button -->
-        <button onclick="toggleSidebar()" id="btn-sidebar-toggle" class="p-1.5 sm:p-2 rounded-xl text-butter hover:bg-white/10 transition flex items-center justify-center focus:outline-none shrink-0" title="Открыть / Скрыть боковое меню">
+        <!-- Sidebar Toggle Button (Mobile) -->
+        <button onclick="toggleSidebar()" id="btn-sidebar-toggle" class="p-1.5 sm:p-2 rounded-xl text-[#67B0C5] hover:text-white hover:bg-white/5 transition flex items-center justify-center md:hidden shrink-0" title="Открыть / Скрыть боковое меню">
           <i data-lucide="menu" class="w-5 h-5"></i>
         </button>
-        <div class="w-9 h-9 sm:w-11 sm:h-11 rounded-xl overflow-hidden shadow-md border border-butter/40 shrink-0 flex items-center justify-center bg-emerald-deep p-0.5">
-          <img src="/logo.png" alt="COSMO CRM Logo" class="w-full h-full object-cover rounded-lg">
-        </div>
-        <div class="shrink-0">
-          <div class="flex items-center gap-1.5 sm:gap-2">
-            <span class="font-serif text-base sm:text-xl font-bold tracking-wider uppercase">COSMO CRM</span>
-            <span class="hidden xs:inline-block text-[9px] sm:text-[10px] font-bold px-1.5 sm:px-2 py-0.2 sm:py-0.5 rounded-full bg-butter/20 text-butter border border-butter/30 whitespace-nowrap">Enterprise</span>
+        
+        <!-- Glowing Logo Orb -->
+        <div class="w-8 h-8 sm:w-9 sm:h-9 rounded-2xl bg-gradient-to-br from-[#00E5FF] to-[#0A3D4A] p-0.5 shadow-[0_0_15px_rgba(0,229,255,0.35)] shrink-0 flex items-center justify-center">
+          <div class="w-full h-full bg-[#03141D] rounded-2xl flex items-center justify-center">
+            <span class="font-bold text-sm sm:text-base bg-gradient-to-r from-[#00E5FF] to-[#7DD3FC] bg-clip-text text-transparent">C</span>
           </div>
-          <p class="text-[11px] text-butter/80 hidden md:block">Сервис промышленной стирки ковров & текстиля</p>
+        </div>
+
+        <div class="flex items-center gap-1.5">
+          <span class="font-sans text-sm sm:text-base font-black tracking-wider uppercase text-white">COSMO CRM</span>
+        </div>
+
+        <!-- Live Clock & Date Badge -->
+        <div class="hidden md:flex items-center gap-2 text-xs text-[#67B0C5] ml-2 lg:ml-4 bg-[#072632] px-3 py-1.5 rounded-xl border border-[#0E4352]">
+          <i data-lucide="clock" class="w-3.5 h-3.5 text-[#00E5FF]"></i>
+          <span id="live-header-clock" class="font-mono font-bold text-white text-xs">11:17</span>
+          <span class="text-[#0E4352]">•</span>
+          <span id="live-header-date" class="text-[11px] text-[#67B0C5]">8 мая 2026, Пт</span>
         </div>
       </div>
 
-      <!-- Center Search (Ctrl + K) -->
-      <div id="header-center-search" class="hidden md:flex items-center flex-1 max-w-md mx-4 lg:mx-6">
-        <div class="relative w-full">
-          <input type="text" id="global-search-input" placeholder="Поиск по ID, клиенту, телефону, адресу (Ctrl+K)..." 
-                 oninput="handleGlobalSearch(this.value)"
-                 class="w-full py-1.5 pl-9 pr-4 text-xs rounded-xl theme-card/10 border border-butter/30 text-butter placeholder-butter/60 focus:bg-white focus:text-emerald-deep focus:outline-none transition">
-          <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2 text-butter/70"></i>
-        </div>
+      <!-- Hidden Center Search (Ctrl+K preserved for shortcuts) -->
+      <div id="header-center-search" class="hidden">
+        <input type="text" id="global-search-input" oninput="handleGlobalSearch(this.value)">
       </div>
 
       <!-- Right User Controls -->
       <div class="flex items-center space-x-1 sm:space-x-2 shrink-0">
-        <!-- Role / Terminal Switcher (hidden as requested by user) -->
+        <!-- Role / Terminal Switcher (hidden) -->
         <div id="nav-terminal-switcher" class="hidden" style="display: none !important;">
           <button type="button" id="btn-portal-switch-admin" onclick="applyRoleWindow('admin')"></button>
           <button type="button" id="btn-portal-switch-courier" onclick="applyRoleWindow('courier')"></button>
@@ -1148,51 +1167,41 @@
         </div>
 
         <!-- Live Data Manual Refresh Button -->
-        <button onclick="manualRefreshData()" id="btn-manual-refresh" class="p-1.5 sm:py-1.5 sm:px-2.5 rounded-xl bg-black/25 hover:bg-black/40 border border-butter/30 text-butter transition shadow-inner flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Обновить данные CRM">
+        <button onclick="manualRefreshData()" id="btn-manual-refresh" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#072632] hover:bg-[#0A3542] border border-[#0E4352] text-[#00E5FF] transition shadow-inner flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Обновить данные CRM">
           <i data-lucide="refresh-cw" class="w-4 h-4 refresh-spin-icon"></i>
         </button>
 
-        <!-- 1-Click Quick Dark/Light Toggle -->
-        <button onclick="toggleTheme()" id="btn-quick-theme-toggle" class="p-1.5 sm:py-1.5 sm:px-2.5 rounded-xl bg-black/25 hover:bg-black/40 border border-butter/30 text-butter flex items-center gap-1 text-xs font-bold transition shadow-inner shrink-0" title="Быстрое переключение темы">
-          <span id="quick-theme-icon" class="text-sm">🌙</span>
-          <span id="quick-theme-label" class="hidden lg:inline text-[11px]">Тёмная</span>
+        <!-- Sun / Theme Toggle -->
+        <button onclick="toggleTheme()" id="btn-quick-theme-toggle" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#072632] hover:bg-[#0A3542] border border-[#0E4352] text-amber-400 transition shadow-inner flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Переключить тему">
+          <i data-lucide="sun" class="w-4 h-4"></i>
+          <span id="quick-theme-icon" class="hidden">☀️</span>
+          <span id="quick-theme-label" class="hidden">Светлая</span>
         </button>
 
-        <!-- 3-Way Eye Comfort Theme Switcher -->
-        <div class="hidden xl:flex items-center bg-black/30 rounded-xl p-0.5 border border-butter/30 text-[11px] font-bold text-butter shadow-inner">
-          <button onclick="setTheme('ivory')" id="btn-theme-ivory" class="px-2 py-1 rounded-lg hover:bg-white/10 transition flex items-center gap-1" title="Теплый Айвори (Мягкий для глаз, восточный уют)">
-            <span>🌿</span> <span class="hidden 2xl:inline">Айвори</span>
-          </button>
-          <button onclick="setTheme('pure')" id="btn-theme-pure" class="px-2 py-1 rounded-lg hover:bg-white/10 transition flex items-center gap-1" title="Чистый Светлый (Офисный классический)">
-            <span>⚪</span> <span class="hidden 2xl:inline">Светлый</span>
-          </button>
-          <button onclick="setTheme('dark')" id="btn-theme-dark" class="px-2 py-1 rounded-lg hover:bg-white/10 transition flex items-center gap-1" title="Ночной Изумруд (Тёмная тема, 0 нагрузки на глаза)">
-            <span>🌙</span> <span class="hidden 2xl:inline">Тёмный</span>
-          </button>
-        </div>
-
-        <!-- Notification Drawer Toggle -->
-        <button onclick="toggleNotificationDrawer()" id="btn-notifications-drawer" class="relative p-1.5 sm:py-1.5 sm:px-2.5 rounded-xl bg-black/25 hover:bg-black/40 border border-butter/30 text-butter transition shadow-inner flex items-center justify-center shrink-0" title="Уведомления CRM">
+        <!-- Notification Drawer Toggle with Red Badge -->
+        <button onclick="toggleNotificationDrawer()" id="btn-notifications-drawer" class="relative w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#072632] hover:bg-[#0A3542] border border-[#0E4352] text-[#67B0C5] hover:text-white transition shadow-inner flex items-center justify-center shrink-0" title="Уведомления CRM">
           <i data-lucide="bell" class="w-4 h-4"></i>
-          <span id="notif-badge" class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white text-[9px] font-bold flex items-center justify-center hidden">0</span>
+          <span id="notif-badge" class="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-bold flex items-center justify-center">3</span>
         </button>
 
-        <button onclick="openNewOrderModal()" id="header-new-order-btn" class="p-1.5 sm:py-1.5 sm:px-3 bg-butter text-emerald-deep rounded-xl text-xs font-bold flex items-center gap-1.5 shadow hover:bg-butter-dark transition shrink-0 whitespace-nowrap" title="Создать заказ">
-          <i data-lucide="plus-circle" class="w-4 h-4"></i>
-          <span class="hidden sm:inline">Новый заказ</span>
+        <!-- Red Logout Button -->
+        <button onclick="logout()" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 hover:text-rose-300 border border-rose-500/30 transition shadow-inner flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Выйти из аккаунта">
+          <i data-lucide="log-out" class="w-4 h-4"></i>
         </button>
 
-        <!-- User Info & Logout Button -->
-        <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <div class="hidden lg:block text-right">
-            <div id="nav-user-name" class="text-xs font-bold text-butter leading-tight truncate max-w-[100px]">Акобир</div>
-            <div id="nav-user-role" class="text-[10px] text-butter/70 capitalize truncate max-w-[100px]">Руководитель</div>
+        <!-- User Role Pill -->
+        <div class="hidden sm:flex items-center gap-2 pl-2 border-l border-[#0E4352]">
+          <div class="w-8 h-8 rounded-full bg-[#072632] border border-[#0E4352] text-[#00E5FF] flex items-center justify-center text-xs shrink-0">
+            <i data-lucide="user" class="w-4 h-4"></i>
           </div>
-          <button onclick="logout()" class="p-1.5 sm:py-1.5 sm:px-3 bg-rose-600/90 hover:bg-rose-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow transition border border-rose-400/30 active:scale-95 cursor-pointer shrink-0 whitespace-nowrap" title="Выйти из аккаунта">
-            <i data-lucide="log-out" class="w-4 h-4"></i>
-            <span class="hidden sm:inline">Выйти</span>
-          </button>
+          <div class="text-left text-xs leading-tight">
+            <div id="nav-user-role" class="font-bold text-white">Диспетчер</div>
+            <div id="nav-user-name" class="text-[10px] text-[#67B0C5]">Сотрудник</div>
+          </div>
         </div>
+
+        <!-- Hidden button hook for JS compatibility -->
+        <button id="header-new-order-btn" onclick="openNewOrderModal()" class="hidden"></button>
       </div>
     </header>
 
@@ -1235,93 +1244,71 @@
             <div id="active-staff-name" class="font-bold text-xs text-emerald-deep truncate">Акобир</div>
           </div>
 
-          <!-- Navigation Items List -->
-          <nav id="nav-tabs" class="space-y-1 text-xs font-bold">
-            <button onclick="switchTab('dashboard')" id="tab-dashboard" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-emerald-deep text-butter shadow text-left transition" title="Сводка">
-              <span class="text-base shrink-0">📊</span>
-              <span class="sidebar-label truncate">Сводка</span>
+          <!-- Navigation Items List matching Photo 1 -->
+          <nav id="nav-tabs" class="space-y-1.5 text-xs font-semibold">
+            <!-- 1. Главная -->
+            <button onclick="switchTab('dashboard')" id="tab-dashboard" class="tab-btn w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-[#00B4D8] text-white shadow-md text-left transition" title="Главная">
+              <i data-lucide="home" class="w-4 h-4 shrink-0"></i>
+              <span class="sidebar-label font-bold">Главная</span>
             </button>
-            <button onclick="switchTab('analytics')" id="tab-analytics" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Аналитика & Графики">
-              <span class="text-base shrink-0">📈</span>
-              <span class="sidebar-label truncate">Аналитика</span>
+            <!-- 2. Заказы -->
+            <button onclick="switchTab('orders')" id="tab-orders" class="tab-btn w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition" title="Заказы">
+              <i data-lucide="file-text" class="w-4 h-4 shrink-0"></i>
+              <span class="sidebar-label">Заказы</span>
             </button>
-            <button onclick="switchTab('orders')" id="tab-orders" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Заказы">
-              <span class="text-base shrink-0">📋</span>
-              <span class="sidebar-label truncate">Заказы</span>
+            <!-- 3. Клиенты -->
+            <button onclick="switchTab('clients')" id="tab-clients" class="tab-btn w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition" title="Клиенты">
+              <i data-lucide="users" class="w-4 h-4 shrink-0"></i>
+              <span class="sidebar-label">Клиенты</span>
             </button>
-            <button onclick="switchTab('kanban')" id="tab-kanban" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Канбан">
-              <span class="text-base shrink-0">🗂️</span>
-              <span class="sidebar-label truncate">Канбан</span>
+            <!-- 4. Сотрудники -->
+            <button onclick="switchTab('staff')" id="tab-staff" class="tab-btn w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition" title="Сотрудники">
+              <i data-lucide="user-check" class="w-4 h-4 shrink-0"></i>
+              <span class="sidebar-label">Сотрудники</span>
             </button>
-            <button onclick="switchTab('archive')" id="tab-archive" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Архив Заказов">
-              <span class="text-base shrink-0">📁</span>
-              <span class="sidebar-label truncate">Архив</span>
+            <!-- 5. Отчёт -->
+            <button onclick="switchTab('analytics')" id="tab-analytics" class="tab-btn w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition" title="Отчёт">
+              <i data-lucide="bar-chart-2" class="w-4 h-4 shrink-0"></i>
+              <span class="sidebar-label">Отчёт</span>
             </button>
-            <button onclick="switchTab('clients')" id="tab-clients" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Клиенты">
-              <span class="text-base shrink-0">👥</span>
-              <span class="sidebar-label truncate">Клиенты</span>
+            <!-- 6. Настройки -->
+            <button onclick="switchTab('integrations')" id="tab-integrations" class="tab-btn w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition" title="Настройки">
+              <i data-lucide="settings" class="w-4 h-4 shrink-0"></i>
+              <span class="sidebar-label">Настройки</span>
             </button>
-            <button onclick="switchTab('calculator')" id="tab-calculator" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Калькулятор">
-              <span class="text-base shrink-0">🧮</span>
-              <span class="sidebar-label truncate">Калькулятор</span>
-            </button>
-            <button onclick="switchTab('finance')" id="tab-finance" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Финансы & Зарплаты">
-              <span class="text-base shrink-0">💰</span>
-              <span class="sidebar-label truncate">Финансы & Зарплаты</span>
-            </button>
-            <button onclick="switchTab('tariffs')" id="tab-tariffs" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Прайс-лист">
-              <span class="text-base shrink-0">🏷️</span>
-              <span class="sidebar-label truncate">Прайс-лист</span>
-            </button>
-            <button onclick="switchTab('logistics')" id="tab-logistics" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Карта & GPS">
-              <span class="text-base shrink-0">🗺️</span>
-              <span class="sidebar-label truncate">Карта & GPS</span>
-            </button>
-            <button onclick="switchTab('integrations')" id="tab-integrations" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="SMS & Telegram">
-              <span class="text-base shrink-0">💬</span>
-              <span class="sidebar-label truncate">SMS & Telegram</span>
-            </button>
-            <button onclick="switchTab('trash')" id="tab-trash" class="tab-btn w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-rose-700 hover:bg-rose-100 text-left transition" title="Корзина">
-              <div class="flex items-center gap-3 truncate">
-                <span class="text-base shrink-0">🗑️</span>
-                <span class="sidebar-label truncate">Корзина</span>
-              </div>
-              <span id="trash-count-badge" class="sidebar-badge bg-rose-600 text-white text-[10px] px-2 py-0.5 rounded-full font-bold">0</span>
-            </button>
-            <button onclick="switchTab('staff')" id="tab-staff" class="tab-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Сотрудники & База">
-              <span class="text-base shrink-0">⚙️</span>
-              <span class="sidebar-label truncate">Сотрудники & База</span>
-            </button>
-          </nav>
 
-          <!-- Dedicated Terminals Section for Quick Switching (Admin / Dispatcher) -->
-          <div class="pt-2 border-t border-emerald-deep/10">
-            <div class="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-charcoal-muted sidebar-header-text">Терминалы смены</div>
-            <div class="space-y-1 text-xs font-bold">
-              <button type="button" onclick="applyRoleWindow('courier')" class="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Терминал курьера">
-                <span class="text-base shrink-0">🚚</span>
-                <span class="sidebar-label truncate">Терминал курьера</span>
+            <!-- Collapsible Additional CRM Modules -->
+            <div class="pt-2 border-t border-[#0E4352]/40">
+              <button type="button" onclick="document.getElementById('more-tabs-drawer').classList.toggle('hidden')" class="w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-[11px] font-bold text-[#67B0C5] hover:text-white hover:bg-white/5 transition">
+                <span>Дополнительно</span>
+                <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
               </button>
-              <button type="button" onclick="applyRoleWindow('washer')" class="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Цех & Замеры">
-                <span class="text-base shrink-0">🧼</span>
-                <span class="sidebar-label truncate">Цех & Замеры</span>
-              </button>
-              <button type="button" onclick="applyRoleWindow('dispatcher')" class="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-emerald-deep hover:bg-emerald-deep/10 text-left transition" title="Портал диспетчера">
-                <span class="text-base shrink-0">📞</span>
-                <span class="sidebar-label truncate">Портал диспетчера</span>
-              </button>
+              <div id="more-tabs-drawer" class="hidden space-y-1 pt-1 pl-1">
+                <button onclick="switchTab('kanban')" id="tab-kanban" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition text-xs"><i data-lucide="trello" class="w-3.5 h-3.5 shrink-0"></i><span>Канбан</span></button>
+                <button onclick="switchTab('logistics')" id="tab-logistics" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition text-xs"><i data-lucide="map-pin" class="w-3.5 h-3.5 shrink-0"></i><span>Карта & GPS</span></button>
+                <button onclick="switchTab('finance')" id="tab-finance" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition text-xs"><i data-lucide="wallet" class="w-3.5 h-3.5 shrink-0"></i><span>Финансы</span></button>
+                <button onclick="switchTab('tariffs')" id="tab-tariffs" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition text-xs"><i data-lucide="tag" class="w-3.5 h-3.5 shrink-0"></i><span>Прайс-лист</span></button>
+                <button onclick="switchTab('calculator')" id="tab-calculator" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition text-xs"><i data-lucide="calculator" class="w-3.5 h-3.5 shrink-0"></i><span>Калькулятор</span></button>
+                <button onclick="switchTab('archive')" id="tab-archive" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[#67B0C5] hover:text-white hover:bg-white/5 text-left transition text-xs"><i data-lucide="archive" class="w-3.5 h-3.5 shrink-0"></i><span>Архив</span></button>
+                <button onclick="switchTab('trash')" id="tab-trash" class="tab-btn w-full flex items-center justify-between px-3 py-2 rounded-lg text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 text-left transition text-xs">
+                  <div class="flex items-center gap-2.5"><i data-lucide="trash-2" class="w-3.5 h-3.5 shrink-0"></i><span>Корзина</span></div>
+                  <span id="trash-count-badge" class="bg-rose-600 text-white text-[10px] px-1.5 py-0.2 rounded-full font-bold">0</span>
+                </button>
+              </div>
             </div>
-          </div>
+          </nav>
         </div>
 
-        <!-- Bottom Quick Actions inside Sidebar -->
-        <div class="p-3 border-t border-emerald-deep/10 space-y-2">
-          <button onclick="openNewOrderModal()" class="w-full py-2 px-3 bg-butter text-emerald-deep rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow hover:bg-butter-dark transition" title="Создать заказ">
-            <i data-lucide="plus-circle" class="w-4 h-4"></i>
-            <span class="sidebar-label">+ Новый заказ</span>
-          </button>
-          <div class="text-[10px] text-center text-charcoal-muted sidebar-header-text">
-            COSMO CRM Enterprise
+        <!-- Support Widget matching Photo 1 -->
+        <div class="p-3 border-t border-[#0E4352]/40">
+          <div class="p-3 rounded-2xl bg-[#072632] border border-[#0E4352] flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-[#03141D] border border-[#0E4352] text-[#00E5FF] flex items-center justify-center shrink-0">
+              <i data-lucide="headphones" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <div class="text-xs font-bold text-white">Поддержка 24/7</div>
+              <div class="text-[10px] text-[#67B0C5]">Мы всегда на связи</div>
+            </div>
           </div>
         </div>
       </aside>
@@ -1368,74 +1355,235 @@
     <!-- MAIN VIEWS CONTAINER -->
     <main class="flex-1 p-3 sm:p-4 md:p-6 pb-28 md:pb-6 max-w-7xl w-full mx-auto space-y-6">
 
-      <!-- ================= VIEW 1: DASHBOARD ================= -->
-      <section id="view-dashboard" class="space-y-6">
-        <!-- KPI Cards Grid -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-          <div class="theme-card border-2 border-emerald-deep/20 rounded-2xl p-3.5 sm:p-4 shadow-sm min-w-0">
-            <div class="flex justify-between items-center text-charcoal-muted mb-1">
-              <span class="text-xs font-bold uppercase truncate">Всего заказов</span>
-              <i data-lucide="package" class="w-4 h-4 text-emerald-deep shrink-0"></i>
+      <!-- ================= VIEW 1: DASHBOARD (CYBER TEAL REDESIGN) ================= -->
+      <section id="view-dashboard" class="space-y-5">
+        <!-- 1. Dispatcher Welcome / Banner Card (matching Photo 1 & 2) -->
+        <div class="p-4 sm:p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div class="flex items-center gap-3.5">
+            <div class="w-12 h-12 rounded-2xl bg-[#03141D] border border-[#0E4352] text-[#00E5FF] flex items-center justify-center shadow-inner shrink-0">
+              <i data-lucide="phone-call" class="w-6 h-6"></i>
             </div>
-            <div id="stat-total-orders" class="text-lg sm:text-2xl font-bold font-mono text-emerald-deep truncate">0</div>
-            <div class="text-[11px] text-charcoal-muted mt-1 truncate">Площадь: <b id="stat-total-m2" class="text-emerald-deep font-mono">0</b> м²</div>
+            <div>
+              <div class="inline-block px-2.5 py-0.5 rounded-full bg-[#03141D] border border-[#0E4352] text-[10px] font-bold text-[#00E5FF] uppercase tracking-wider mb-1">
+                ДИСПЕТЧЕРСКИЙ ПОРТАЛ
+              </div>
+              <h2 class="text-lg sm:text-xl font-black text-white flex items-center gap-2">
+                <span id="dashboard-dispatcher-name">Акобир</span> • <span id="dashboard-dispatcher-role">Диспетчер</span>
+              </h2>
+              <div class="flex items-center gap-1.5 text-xs text-[#67B0C5] mt-0.5">
+                <span class="w-2 h-2 rounded-full bg-[#10B981] animate-pulse"></span>
+                <span id="dashboard-live-date">Сегодня, 10 октября 2026</span>
+              </div>
+            </div>
           </div>
 
-          <div class="theme-card border-2 border-emerald-deep/20 rounded-2xl p-3.5 sm:p-4 shadow-sm min-w-0">
-            <div class="flex justify-between items-center text-charcoal-muted mb-1">
-              <span class="text-xs font-bold uppercase truncate">В цеху / стирка</span>
-              <i data-lucide="waves" class="w-4 h-4 text-emerald-deep shrink-0"></i>
-            </div>
-            <div id="stat-washing-count" class="text-lg sm:text-2xl font-bold font-mono text-emerald-deep truncate">0</div>
-            <div class="text-[11px] text-charcoal-muted mt-1 truncate">Сушка: <b id="stat-drying-count" class="text-emerald-deep font-mono">0</b></div>
-          </div>
-
-          <div class="theme-card border-2 border-emerald-deep/20 rounded-2xl p-3.5 sm:p-4 shadow-sm min-w-0">
-            <div class="flex justify-between items-center text-charcoal-muted mb-1">
-              <span class="text-xs font-bold uppercase truncate">Выручка</span>
-              <i data-lucide="wallet" class="w-4 h-4 text-emerald-deep shrink-0"></i>
-            </div>
-            <div id="stat-total-revenue" class="text-lg sm:text-2xl font-bold font-mono text-emerald-deep truncate">0 сум</div>
-            <div class="text-[11px] text-emerald-deep font-semibold mt-1 truncate">Оплачено: <b id="stat-paid-revenue" class="font-mono">0</b> сум</div>
-          </div>
-
-          <div class="theme-card border-2 border-rose-300 rounded-2xl p-3.5 sm:p-4 shadow-sm min-w-0">
-            <div class="flex justify-between items-center text-rose-800 mb-1">
-              <span class="text-xs font-bold uppercase truncate">Долги клиентов</span>
-              <i data-lucide="alert-circle" class="w-4 h-4 text-rose-700 shrink-0"></i>
-            </div>
-            <div id="stat-client-debts" class="text-lg sm:text-2xl font-bold font-mono text-rose-700 truncate">0 сум</div>
-            <div class="text-[11px] text-rose-800 mt-1 cursor-pointer hover:underline truncate" onclick="switchTab('finance')">Реестр долгов →</div>
+          <!-- Action buttons -->
+          <div class="flex flex-wrap items-center gap-2.5">
+            <button onclick="openNewOrderModal()" class="py-2.5 px-4 bg-[#03141D] hover:bg-[#0A3542] border border-[#00E5FF]/40 text-[#00E5FF] hover:text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
+              <i data-lucide="plus-circle" class="w-4 h-4"></i>
+              <span>Новый заказ</span>
+            </button>
+            <button onclick="switchTab('logistics')" class="py-2.5 px-4 bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] text-[#67B0C5] hover:text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
+              <i data-lucide="map-pin" class="w-4 h-4 text-[#00E5FF]"></i>
+              <span>Маршруты</span>
+            </button>
+            <button onclick="openBroadcastModal()" class="py-2.5 px-5 bg-[#00B4D8] hover:bg-[#0096C7] text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-md">
+              <i data-lucide="send" class="w-4 h-4"></i>
+              <span>Рассылка</span>
+            </button>
           </div>
         </div>
 
-        <!-- Today's Schedule & Quick Action Cards -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <!-- Left: Urgent and Pending Orders -->
-          <div class="lg:col-span-2 theme-card border border-emerald-deep/20 rounded-2xl p-5 shadow-sm space-y-4">
-            <div class="flex items-center justify-between border-b border-emerald-deep/10 pb-3">
-              <h3 class="font-serif text-xl font-bold text-emerald-deep">Срочные и текущие заказы</h3>
-              <button onclick="switchTab('orders')" class="text-xs font-bold text-emerald-deep hover:underline">
-                Все заказы →
-              </button>
+        <!-- 2. Top 4 KPI Metrics Cards (matching Photo 1 & 2) -->
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+          <!-- Card 1: Новые -->
+          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
+            <div>
+              <div class="text-xs text-[#67B0C5] font-medium">Новые</div>
+              <div id="stat-kpi-new" class="text-2xl sm:text-3xl font-black text-white font-mono mt-0.5">8</div>
+              <div class="text-[11px] font-bold text-[#00E5A3] mt-1 flex items-center gap-1">
+                <span>↑ +3</span>
+              </div>
             </div>
-            <div id="dashboard-urgent-list" class="space-y-3">
-              <!-- Rendered via JS -->
+            <div class="w-12 h-12 rounded-full bg-[#00E5A3]/10 border border-[#00E5A3]/25 text-[#00E5A3] flex items-center justify-center shrink-0">
+              <i data-lucide="plus" class="w-6 h-6"></i>
             </div>
           </div>
 
-          <!-- Right: Recent Activity / Audit Log -->
-          <div class="theme-card border border-emerald-deep/20 rounded-2xl p-5 shadow-sm space-y-4">
-            <div class="flex items-center justify-between border-b border-emerald-deep/10 pb-3">
-              <h3 class="font-serif text-xl font-bold text-emerald-deep">Журнал операций</h3>
-              <button onclick="loadInitialData()" class="text-xs text-charcoal-muted hover:text-emerald-deep">
-                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
-              </button>
+          <!-- Card 2: Забор сегодня -->
+          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
+            <div>
+              <div class="text-xs text-[#67B0C5] font-medium">Забор сегодня</div>
+              <div id="stat-kpi-pickup" class="text-2xl sm:text-3xl font-black text-white font-mono mt-0.5">12</div>
+              <div class="text-[11px] font-bold text-[#F59E0B] mt-1 flex items-center gap-1">
+                <span>↑ +2</span>
+              </div>
             </div>
-            <div id="dashboard-audit-list" class="space-y-3 text-xs">
-              <!-- Rendered via JS -->
+            <div class="w-12 h-12 rounded-full bg-[#F59E0B]/10 border border-[#F59E0B]/25 text-[#F59E0B] flex items-center justify-center shrink-0">
+              <i data-lucide="package" class="w-6 h-6"></i>
             </div>
           </div>
+
+          <!-- Card 3: В цеху -->
+          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
+            <div>
+              <div class="text-xs text-[#67B0C5] font-medium">В цеху</div>
+              <div id="stat-kpi-washing" class="text-2xl sm:text-3xl font-black text-white font-mono mt-0.5">24</div>
+              <div class="text-[11px] font-bold text-[#00E5FF] mt-1 flex items-center gap-1">
+                <span>↑ +5</span>
+              </div>
+            </div>
+            <div class="w-12 h-12 rounded-full bg-[#00E5FF]/10 border border-[#00E5FF]/25 text-[#00E5FF] flex items-center justify-center shrink-0">
+              <i data-lucide="waves" class="w-6 h-6"></i>
+            </div>
+          </div>
+
+          <!-- Card 4: Доставка -->
+          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
+            <div>
+              <div class="text-xs text-[#67B0C5] font-medium">Доставка</div>
+              <div id="stat-kpi-delivery" class="text-2xl sm:text-3xl font-black text-white font-mono mt-0.5">7</div>
+              <div class="text-[11px] font-bold text-rose-400 mt-1 flex items-center gap-1">
+                <span>↓ -1</span>
+              </div>
+            </div>
+            <div class="w-12 h-12 rounded-full bg-[#8B5CF6]/10 border border-[#8B5CF6]/25 text-[#8B5CF6] flex items-center justify-center shrink-0">
+              <i data-lucide="truck" class="w-6 h-6"></i>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. "Заказы на сегодня" Section (matching Photo 1 & 2) -->
+        <div class="p-4 sm:p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <i data-lucide="clipboard-list" class="w-5 h-5 text-[#00E5FF]"></i>
+              <h3 class="text-base sm:text-lg font-bold text-white">Заказы на сегодня</h3>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2.5">
+              <!-- Search bar -->
+              <div class="relative flex-1 sm:w-64">
+                <input type="text" id="dashboard-orders-search" placeholder="Поиск по ID, клиенту, телефону или адресу..." 
+                       oninput="filterDashboardOrders()" 
+                       class="w-full py-2 pl-8 pr-3 text-xs rounded-xl bg-[#03141D] border border-[#0E4352] text-white placeholder-[#67B0C5]/60 focus:border-[#00E5FF] outline-none">
+                <i data-lucide="search" class="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-[#67B0C5]"></i>
+              </div>
+
+              <!-- Filter Dropdown -->
+              <select id="dashboard-orders-filter" onchange="filterDashboardOrders()" class="py-2 px-3 text-xs rounded-xl bg-[#03141D] border border-[#0E4352] text-white focus:border-[#00E5FF] outline-none font-bold">
+                <option value="all">Все заказы</option>
+                <option value="pickup">Новые / К забору</option>
+                <option value="in_shop">В работе (Цех)</option>
+                <option value="delivery">Доставка</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Desktop Table View (photo 1) -->
+          <div class="hidden md:block overflow-x-auto custom-scrollbar">
+            <table class="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr class="text-[#67B0C5] border-b border-[#0E4352] uppercase text-[10px] tracking-wider">
+                  <th class="py-3 px-3"># Заказа</th>
+                  <th class="py-3 px-3">Клиент</th>
+                  <th class="py-3 px-3">Адрес / Район</th>
+                  <th class="py-3 px-3">Услуга</th>
+                  <th class="py-3 px-3">Статус</th>
+                  <th class="py-3 px-3">Время</th>
+                  <th class="py-3 px-3 text-right">Действия</th>
+                </tr>
+              </thead>
+              <tbody id="dashboard-orders-tbody" class="divide-y divide-[#0E4352]/50 text-white">
+                <!-- Rendered via JS -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Mobile Cards View (photo 2) -->
+          <div id="dashboard-orders-mobile-list" class="md:hidden space-y-2.5">
+            <!-- Rendered via JS -->
+          </div>
+        </div>
+
+        <!-- 4. Bottom 2 Columns: "Ближайшие задачи" & "Быстрые действия" (matching Photo 1 & 2) -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5">
+          <!-- Left: Ближайшие задачи -->
+          <div class="p-4 sm:p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm space-y-3.5">
+            <div class="flex items-center justify-between border-b border-[#0E4352]/60 pb-2.5">
+              <div class="flex items-center gap-2">
+                <i data-lucide="calendar" class="w-4 h-4 text-[#00E5FF]"></i>
+                <h3 class="text-sm sm:text-base font-bold text-white">Ближайшие задачи</h3>
+              </div>
+              <button onclick="switchTab('orders')" class="text-xs font-bold text-[#00E5FF] hover:underline flex items-center gap-1">
+                <span>Все задачи</span>
+                <span>→</span>
+              </button>
+            </div>
+
+            <div id="dashboard-tasks-timeline" class="space-y-3 relative">
+              <!-- Rendered via JS with connecting line -->
+            </div>
+          </div>
+
+          <!-- Right: Быстрые действия -->
+          <div class="p-4 sm:p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm space-y-3.5">
+            <div class="flex items-center gap-2 border-b border-[#0E4352]/60 pb-2.5">
+              <i data-lucide="zap" class="w-4 h-4 text-[#00E5FF]"></i>
+              <h3 class="text-sm sm:text-base font-bold text-white">Быстрые действия</h3>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <!-- 1. Новый заказ -->
+              <button onclick="openNewOrderModal()" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
+                <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                  <i data-lucide="file-plus-2" class="w-5 h-5"></i>
+                </div>
+                <div class="text-xs font-bold text-white">Новый заказ</div>
+                <div class="text-[10px] text-[#67B0C5] mt-0.5">Создать заказ для клиента</div>
+              </button>
+
+              <!-- 2. Клиенты -->
+              <button onclick="switchTab('clients')" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
+                <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                  <i data-lucide="users" class="w-5 h-5"></i>
+                </div>
+                <div class="text-xs font-bold text-white">Клиенты</div>
+                <div class="text-[10px] text-[#67B0C5] mt-0.5">База клиентов и контакты</div>
+              </button>
+
+              <!-- 3. Сотрудники -->
+              <button onclick="switchTab('staff')" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
+                <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                  <i data-lucide="user-check" class="w-5 h-5"></i>
+                </div>
+                <div class="text-xs font-bold text-white">Сотрудники</div>
+                <div class="text-[10px] text-[#67B0C5] mt-0.5">График и задачи персонала</div>
+              </button>
+
+              <!-- 4. Отчёт -->
+              <button onclick="switchTab('analytics')" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
+                <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                  <i data-lucide="bar-chart-3" class="w-5 h-5"></i>
+                </div>
+                <div class="text-xs font-bold text-white">Отчёт</div>
+                <div class="text-[10px] text-[#67B0C5] mt-0.5">Статистика и аналитика</div>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hidden legacy stat elements for JS backwards-compatibility -->
+        <div class="hidden" style="display: none !important;">
+          <span id="stat-total-orders">0</span>
+          <span id="stat-total-m2">0</span>
+          <span id="stat-washing-count">0</span>
+          <span id="stat-drying-count">0</span>
+          <span id="stat-total-revenue">0</span>
+          <span id="stat-paid-revenue">0</span>
+          <span id="stat-client-debts">0</span>
+          <div id="dashboard-urgent-list"></div>
+          <div id="dashboard-audit-list"></div>
         </div>
       </section>
 
