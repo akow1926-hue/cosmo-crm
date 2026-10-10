@@ -684,6 +684,10 @@ async function manualRefreshData() {
 // ================= ROLE WINDOWS & PORTALS CONTROLLER =================
 
 function applyRoleWindow(role) {
+  // Security: non-admin roles cannot access main CRM
+  if (role === 'admin' && currentUser?.role && currentUser.role !== 'admin') {
+    role = currentUser.role;
+  }
   currentViewRole = role;
 
   const winAdmin = document.getElementById('window-admin');
@@ -757,16 +761,6 @@ function updateRoleSwitcherUi(activeRole) {
     switcher.classList.add('hidden');
     switcher.style.display = 'none';
   }
-
-  const btnCourierAdmin = document.getElementById('btn-courier-to-admin');
-  const btnWasherAdmin = document.getElementById('btn-washer-to-admin');
-  const btnDispAdmin = document.getElementById('btn-disp-to-admin');
-  [btnCourierAdmin, btnWasherAdmin, btnDispAdmin].forEach(b => {
-    if (b) {
-      if (currentUser?.role === 'admin') b.classList.remove('hidden');
-      else b.classList.add('hidden');
-    }
-  });
 
   // Strictly control Mobile Bottom Nav: ONLY visible for Admin!
   const mobileBottomNav = document.getElementById('mobile-bottom-nav');
@@ -5066,6 +5060,7 @@ function renderDispatcherPortal() {
     `;
   }).join('');
 
+  renderDispatcherCourierMonitor();
   renderDispatcherPortalOrders();
 }
 
@@ -5091,6 +5086,7 @@ async function quickAssignCourier(orderId, courierName) {
       renderDispatcherPortalOrders();
       renderOrdersTable();
       renderKanban();
+      renderDispatcherCourierMonitor();
     } else {
       alert('Ошибка назначения курьера');
     }
@@ -5158,10 +5154,13 @@ function renderDispatcherPortalOrders() {
     return `
       <div class="theme-card border border-emerald-deep/20 rounded-2xl p-4 shadow-sm hover:shadow-md transition flex flex-col justify-between space-y-3">
         <div>
-          <!-- Header: ID + Urgent + Stage -->
+          <!-- Header: ID + Urgent + Stage + Quick Receipt Button -->
           <div class="flex items-center justify-between gap-2 border-b border-emerald-deep/10 pb-2">
             <div class="flex items-center gap-1.5">
               <span class="font-mono font-bold text-xs px-2.5 py-1 rounded-xl bg-emerald-deep text-butter shadow-xs">#${escapeHtml(order.id)}</span>
+              <button type="button" onclick="printOrderReceipt('${order.id}')" class="p-1 rounded-lg text-charcoal-muted hover:text-emerald-deep hover:bg-emerald-deep/10 transition" title="Быстрая печать чека накладной">
+                <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+              </button>
               ${order.urgent ? '<span class="bg-rose-100 text-rose-800 text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse">⚡ Срочно (+20%)</span>' : ''}
             </div>
             <div>${getStageBadge(order.stage)}</div>
@@ -5236,7 +5235,11 @@ function renderDispatcherPortalOrders() {
         <!-- Actions Toolbar -->
         <div class="border-t border-emerald-deep/15 pt-2.5 flex items-center justify-between gap-1.5 flex-wrap">
           <div class="flex items-center gap-1.5 flex-wrap">
-            <button type="button" onclick="openEditOrderModal('${order.id}')" class="py-1.5 px-2.5 bg-emerald-deep text-butter rounded-xl text-xs font-bold hover:bg-emerald-hover transition flex items-center gap-1 shadow-xs">
+            <button type="button" onclick="printOrderReceipt('${order.id}')" class="py-1.5 px-2.5 bg-emerald-deep text-butter rounded-xl text-xs font-bold hover:bg-emerald-hover transition flex items-center gap-1 shadow-xs" title="Печать чека / накладной">
+              <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+              <span>Печать чека</span>
+            </button>
+            <button type="button" onclick="openEditOrderModal('${order.id}')" class="py-1.5 px-2.5 bg-white text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold hover:bg-butter transition flex items-center gap-1 shadow-xs">
               <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
               <span>Редактировать</span>
             </button>
@@ -5271,6 +5274,367 @@ function renderDispatcherPortalOrders() {
   }).join('');
 
   if (window.lucide) lucide.createIcons();
+}
+
+// ================= DISPATCHER COURIER RADAR & ACTIVITY MONITOR =================
+
+let dispCourierMap = null;
+let dispCourierMarkers = [];
+let isDispCourierMonitorExpanded = true;
+let isDispCourierMapExpanded = false;
+
+function toggleDispatcherCourierMonitor() {
+  const section = document.getElementById('disp-courier-monitor-section');
+  if (!section) return;
+  isDispCourierMonitorExpanded = !isDispCourierMonitorExpanded;
+  section.classList.toggle('hidden', !isDispCourierMonitorExpanded);
+  if (isDispCourierMonitorExpanded) {
+    renderDispatcherCourierMonitor();
+  }
+}
+
+async function renderDispatcherCourierMonitor() {
+  const container = document.getElementById('disp-couriers-live-cards');
+  const badgeEl = document.getElementById('disp-couriers-online-badge');
+  if (!container) return;
+
+  // 1. Fetch courier live locations
+  let locations = [];
+  try {
+    const res = await fetch('/api/gps/locations');
+    if (res.ok) locations = await res.json();
+  } catch (e) {}
+
+  // 2. Identify all couriers (from staff + active orders + locations)
+  const couriersList = [];
+  const staffCouriers = allStaff.filter(s => s.role === 'courier');
+  staffCouriers.forEach(s => couriersList.push({ name: s.name, phone: s.phone || '+998 90 777-88-99' }));
+
+  // Add default courier if staff list is empty
+  if (couriersList.length === 0) {
+    couriersList.push({ name: 'Дамир (Курьер / Доставка)', phone: '+998 90 777-88-99' });
+  }
+
+  // Find any courier mentioned in orders
+  activeOrders.forEach(o => {
+    const cn = cleanCourierName(o.courier_name);
+    if (cn && !couriersList.some(c => c.name.toLowerCase().includes(cn.toLowerCase()) || cn.toLowerCase().includes(c.name.toLowerCase()))) {
+      couriersList.push({ name: cn, phone: '+998 90 777-88-99' });
+    }
+  });
+
+  // Calculate workloads and statuses
+  let onlineCount = 0;
+  const cardsHtml = couriersList.map(courier => {
+    const cName = courier.name;
+    const cleanC = cName.replace(/\s*\(.*?\)\s*/g, '').trim();
+
+    // Match location
+    const loc = locations.find(l => {
+      if (!l || !l.courier_name) return false;
+      const ln = l.courier_name.toLowerCase();
+      return ln.includes(cleanC.toLowerCase()) || cleanC.toLowerCase().includes(ln);
+    }) || locations[0]; // fallback to first location if single crew
+
+    const isOnline = Boolean(loc && typeof loc.lat === 'number' && !isNaN(loc.lat));
+    if (isOnline) onlineCount++;
+
+    // Calculate orders assigned to this courier
+    const myOrders = activeOrders.filter(o => isOrderForCourier(o, { role: 'courier', name: cName }));
+    const myPickups = myOrders.filter(o => isPickupStage(o.stage));
+    const myDeliveries = myOrders.filter(o => isReadyOrDeliveryStage(o.stage));
+    const todayIso = toIsoDateSafe(new Date()) || new Date().toISOString().slice(0, 10);
+    const myDoneToday = myOrders.filter(o => {
+      if (!isDeliveredStage(o.stage)) return false;
+      const orderDate = toIsoDateSafe(o.delivery_date || o.completed_date || o.created_at);
+      return orderDate ? orderDate === todayIso : true;
+    });
+
+    // Calculate cash in pocket for courier
+    let courierCash = 0;
+    myDoneToday.forEach(o => {
+      if (o.payment_method === 'cash' || (!o.payment_method && o.paid)) {
+        courierCash += (o.paid_amount || o.total_price || 0);
+      }
+    });
+
+    // Current active task
+    let currentTaskText = '';
+    let currentOrder = myDeliveries[0] || myPickups[0];
+    if (currentOrder) {
+      const isDeliv = isReadyOrDeliveryStage(currentOrder.stage);
+      currentTaskText = `
+        <div class="mt-1.5 p-2 bg-emerald-deep/5 rounded-xl border border-emerald-deep/10 text-[11px]">
+          <div class="font-bold text-emerald-deep flex items-center justify-between">
+            <span>${isDeliv ? '🚚 Доставляет заказ' : '📦 Едет на забор'} #${escapeHtml(currentOrder.id)}:</span>
+            <span class="font-mono">${(currentOrder.total_price || 0).toLocaleString()} сум</span>
+          </div>
+          <div class="text-charcoal-deep font-semibold truncate mt-0.5">${escapeHtml(currentOrder.client_name)} • ${escapeHtml(currentOrder.client_address)}</div>
+          <div class="text-[10px] text-charcoal-muted">${escapeHtml(currentOrder.district || 'Самарканд')} • Тел: ${escapeHtml(currentOrder.client_phone)}</div>
+        </div>
+      `;
+    } else {
+      currentTaskText = `
+        <div class="mt-1.5 p-2 bg-gray-50 rounded-xl border border-gray-200 text-[11px] text-charcoal-muted font-medium flex items-center gap-1.5">
+          <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-600"></i>
+          <span>Свободен (нет активных заявок)</span>
+        </div>
+      `;
+    }
+
+    const lat = loc?.lat || 39.6542;
+    const lng = loc?.lng || 66.9597;
+    const speed = loc?.speed ? Math.round(loc.speed) : 0;
+    const battery = loc?.battery || 95;
+
+    return `
+      <div class="p-3.5 rounded-2xl bg-white border border-emerald-deep/15 shadow-xs flex flex-col justify-between space-y-2 hover:shadow-md transition">
+        <div>
+          <!-- Courier Header -->
+          <div class="flex items-center justify-between gap-2 border-b border-emerald-deep/10 pb-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <div class="w-8 h-8 rounded-xl bg-emerald-deep text-butter flex items-center justify-center font-bold text-sm shrink-0">
+                <i data-lucide="truck" class="w-4 h-4"></i>
+              </div>
+              <div class="min-w-0">
+                <h4 class="font-bold text-xs sm:text-sm text-emerald-deep truncate">${escapeHtml(cName)}</h4>
+                <div class="text-[10px] text-charcoal-muted flex items-center gap-1">
+                  ${isOnline 
+                    ? '<span class="inline-flex items-center gap-1 text-emerald-700 font-bold"><span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span>GPS: В сети</span>' 
+                    : '<span class="text-charcoal-muted">GPS: Офлайн</span>'}
+                  <span>• 🔋 ${battery}%</span>
+                  ${speed > 0 ? `<span>• 🚗 ${speed} км/ч</span>` : ''}
+                </div>
+              </div>
+            </div>
+            <div class="text-right shrink-0">
+              <div class="text-[10px] text-charcoal-muted">В кассе:</div>
+              <div class="font-mono font-bold text-xs text-emerald-deep">${courierCash.toLocaleString()} сум</div>
+            </div>
+          </div>
+
+          <!-- Workload counters -->
+          <div class="grid grid-cols-3 gap-1.5 pt-2 text-center text-[10px] font-bold">
+            <div class="p-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-200">
+              <div>${myPickups.length}</div>
+              <div class="font-normal text-[9px] text-amber-700">Заборы</div>
+            </div>
+            <div class="p-1 rounded-lg bg-blue-50 text-blue-900 border border-blue-200">
+              <div>${myDeliveries.length}</div>
+              <div class="font-normal text-[9px] text-blue-700">Доставки</div>
+            </div>
+            <div class="p-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-200">
+              <div>${myDoneToday.length}</div>
+              <div class="font-normal text-[9px] text-emerald-700">Сдано</div>
+            </div>
+          </div>
+
+          <!-- Current task -->
+          ${currentTaskText}
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="pt-2 flex items-center gap-1.5 border-t border-emerald-deep/10">
+          <button type="button" onclick="focusCourierOnDispMap(${lat}, ${lng}, '${escapeHtml(cName)}')" class="flex-1 py-1.5 px-2 bg-emerald-deep text-butter rounded-xl text-xs font-bold hover:bg-emerald-hover transition flex items-center justify-center gap-1 shadow-xs">
+            <i data-lucide="map-pin" class="w-3 h-3"></i>
+            <span>На карте</span>
+          </button>
+          <a href="tel:${escapeHtml(courier.phone)}" class="py-1.5 px-2.5 bg-white text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold hover:bg-butter transition flex items-center gap-1 shadow-xs">
+            <i data-lucide="phone-call" class="w-3 h-3"></i>
+            <span>Позвонить</span>
+          </a>
+          <button type="button" onclick="openDispatcherBroadcastModal()" class="p-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold hover:bg-blue-100 transition" title="Отправить сообщение в группу">
+            <i data-lucide="send" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  container.innerHTML = cardsHtml;
+  if (badgeEl) badgeEl.textContent = `${onlineCount} экипаж${onlineCount === 1 ? '' : (onlineCount > 1 && onlineCount < 5 ? 'а' : 'ей')} в сети`;
+  if (window.lucide) lucide.createIcons();
+
+  if (isDispCourierMapExpanded) {
+    updateDispatcherCourierMapMarkers(locations);
+  }
+}
+
+function refreshDispatcherCourierMonitor() {
+  renderDispatcherCourierMonitor();
+  showToast('📍 Данные GPS и статус курьеров обновлены', 'info');
+}
+
+function toggleDispatcherCourierMap() {
+  const mapWrapper = document.getElementById('disp-courier-map-wrapper');
+  const toggleText = document.getElementById('disp-map-toggle-text');
+  if (!mapWrapper) return;
+
+  isDispCourierMapExpanded = !isDispCourierMapExpanded;
+  mapWrapper.classList.toggle('hidden', !isDispCourierMapExpanded);
+  if (toggleText) toggleText.textContent = isDispCourierMapExpanded ? '🔼 Скрыть карту' : '🗺️ Открыть карту';
+
+  if (isDispCourierMapExpanded) {
+    initDispatcherCourierMap();
+  }
+}
+
+function initDispatcherCourierMap() {
+  const mapDiv = document.getElementById('disp-courier-map');
+  if (!mapDiv || typeof L === 'undefined') return;
+
+  if (!dispCourierMap) {
+    dispCourierMap = L.map('disp-courier-map').setView([39.6542, 66.9597], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(dispCourierMap);
+  } else {
+    dispCourierMap.invalidateSize();
+  }
+
+  fetch('/api/gps/locations')
+    .then(r => r.json())
+    .then(locs => updateDispatcherCourierMapMarkers(locs))
+    .catch(() => updateDispatcherCourierMapMarkers([]));
+}
+
+function updateDispatcherCourierMapMarkers(locations = []) {
+  if (!dispCourierMap || typeof L === 'undefined') return;
+
+  dispCourierMarkers.forEach(m => dispCourierMap.removeLayer(m));
+  dispCourierMarkers = [];
+
+  // Plant marker
+  const plantIcon = L.divIcon({
+    className: 'plant-marker',
+    html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:bold; font-size:10px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,0.3);">🏭 ЦЕХ COSMO</div>`,
+    iconSize: [95, 26]
+  });
+  const pm = L.marker([39.6542, 66.9597], { icon: plantIcon }).addTo(dispCourierMap)
+    .bindPopup('<b>Главный технологический цех COSMO CRM</b><br>Самарканд, ул. Мирзо Улугбека');
+  dispCourierMarkers.push(pm);
+
+  // Active orders markers
+  activeOrders.forEach(o => {
+    if (!['pickup', 'ready', 'delivery'].includes(o.stage)) return;
+    const coordInfo = getOrderCoordinatesWithFallback(o);
+    const isPickup = isPickupStage(o.stage);
+    const color = isPickup ? '#1D8B94' : '#2563EB';
+
+    const orderIcon = L.divIcon({
+      className: 'order-marker',
+      html: `<div style="background:${color}; color:#fff; padding:2px 6px; border-radius:8px; font-weight:bold; font-size:9px; border:1.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.3); white-space:nowrap;">${isPickup ? '📦' : '🚚'} #${o.id}</div>`,
+      iconSize: [60, 20]
+    });
+
+    const om = L.marker(coordInfo.coords, { icon: orderIcon }).addTo(dispCourierMap)
+      .bindPopup(`
+        <div style="font-size:11px; line-height:1.35; padding:2px;">
+          <b>${isPickup ? '📦 Забор' : '🚚 Доставка'} #${o.id}</b><br>
+          <b>Клиент:</b> ${escapeHtml(o.client_name)}<br>
+          <b>Адрес:</b> ${escapeHtml(o.client_address)} (${escapeHtml(o.district || 'Самарканд')})<br>
+          <b>Сумма:</b> ${(o.total_price || 0).toLocaleString()} сум<br>
+          <div style="margin-top:4px;">
+            <button onclick="printOrderReceipt('${o.id}')" style="background:#04222B; color:#fff; border:none; padding:3px 7px; border-radius:6px; font-size:10px; cursor:pointer;">🖨️ Чек</button>
+            <button onclick="callClient('${o.id}', '${escapeHtml(o.client_phone)}', '${escapeHtml(o.client_name)}')" style="background:#1D8B94; color:#fff; border:none; padding:3px 7px; border-radius:6px; font-size:10px; cursor:pointer;">📞 Звонок</button>
+          </div>
+        </div>
+      `);
+    dispCourierMarkers.push(om);
+  });
+
+  // Couriers live GPS markers
+  locations.forEach(loc => {
+    if (!loc || typeof loc.lat !== 'number' || isNaN(loc.lat)) return;
+    const displayName = (loc.courier_name || 'Курьер').split(' ')[0];
+    const courierIcon = L.divIcon({
+      className: 'courier-marker',
+      html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:800; font-size:11px; border:2px solid #98D8D0; box-shadow:0 0 10px rgba(29,139,148,0.8); white-space:nowrap;">🚚 ${escapeHtml(displayName)}</div>`,
+      iconSize: [85, 26]
+    });
+
+    const cm = L.marker([loc.lat, loc.lng], { icon: courierIcon }).addTo(dispCourierMap)
+      .bindPopup(`
+        <div style="font-size:12px; line-height:1.35;">
+          <b>🚚 Экипаж: ${escapeHtml(loc.courier_name || 'Курьер')}</b><br>
+          Скорость: ${loc.speed || 0} км/ч • Батарея: ${loc.battery || 100}%<br>
+          <span style="color:#059669; font-weight:bold;">🟢 В сети (GPS онлайн)</span>
+        </div>
+      `);
+    dispCourierMarkers.push(cm);
+  });
+}
+
+function focusCourierOnDispMap(lat, lng, name) {
+  if (!isDispCourierMapExpanded) {
+    toggleDispatcherCourierMap();
+  }
+  setTimeout(() => {
+    if (dispCourierMap) {
+      dispCourierMap.setView([lat, lng], 15);
+      showToast(`📍 Фокус на экипаже ${name}`, 'info');
+    }
+  }, 150);
+}
+
+// ================= DISPATCHER RECEIPT MODAL CONTROLLER =================
+
+function openDispatcherPrintModal(defaultOrderId = null) {
+  const modal = document.getElementById('modal-dispatcher-print-receipt');
+  const select = document.getElementById('disp-print-order-select');
+  if (!modal || !select) return;
+
+  if (activeOrders.length === 0) {
+    alert('Нет активных заказов для печати чека');
+    return;
+  }
+
+  select.innerHTML = activeOrders.map(o => {
+    const isSel = defaultOrderId && String(o.id) === String(defaultOrderId);
+    return `<option value="${escapeHtml(o.id)}" ${isSel ? 'selected' : ''}>#${escapeHtml(o.id)} - ${escapeHtml(o.client_name)} (${(o.total_price || 0).toLocaleString()} сум)</option>`;
+  }).join('');
+
+  previewDispatcherReceiptForSelectedOrder();
+  modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
+}
+
+function previewDispatcherReceiptForSelectedOrder() {
+  const select = document.getElementById('disp-print-order-select');
+  const preview = document.getElementById('disp-print-order-preview');
+  if (!select || !preview) return;
+
+  const orderId = select.value;
+  const order = activeOrders.find(o => String(o.id) === String(orderId));
+  if (!order) {
+    preview.innerHTML = '<div class="text-charcoal-muted">Заказ не выбран</div>';
+    return;
+  }
+
+  const carpets = order.carpets ? (typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets) : [];
+  const carpetsCount = carpets.length > 0 ? carpets.length : 1;
+
+  preview.innerHTML = `
+    <div class="flex items-center justify-between border-b border-emerald-deep/10 pb-1.5">
+      <span class="font-bold text-emerald-deep font-mono text-sm">#${escapeHtml(order.id)}</span>
+      <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${order.paid ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">
+        ${order.paid ? '● Оплачен' : '○ К оплате: ' + ((order.total_price || 0) - (order.paid_amount || 0)).toLocaleString() + ' сум'}
+      </span>
+    </div>
+    <div class="text-xs"><b>Клиент:</b> ${escapeHtml(order.client_name)} (${escapeHtml(order.client_phone)})</div>
+    <div class="text-xs"><b>Адрес:</b> ${escapeHtml(order.client_address)} (${escapeHtml(order.district || 'Самарканд')})</div>
+    <div class="text-xs"><b>Изделия:</b> ${carpetsCount} шт • ${order.total_m2 || 0} м² • <b>Итого: ${(order.total_price || 0).toLocaleString()} сум</b></div>
+    <div class="text-[10px] text-charcoal-muted">Курьер: ${escapeHtml(order.courier_name || 'Не назначен')}</div>
+  `;
+}
+
+function executeDispatcherPrint() {
+  const select = document.getElementById('disp-print-order-select');
+  if (!select || !select.value) return;
+
+  const orderId = select.value;
+  closeModal('modal-dispatcher-print-receipt');
+  printOrderReceipt(orderId);
 }
 
 function openDispatcherBroadcastModal() {

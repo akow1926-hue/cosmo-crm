@@ -2411,10 +2411,6 @@
 
         <div class="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto shrink-0">
           <div class="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
-            <button id="btn-disp-to-admin" onclick="applyRoleWindow('admin')" class="hidden py-2 px-3 bg-emerald-deep text-butter border border-butter/30 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-emerald-hover transition shadow-xs shrink-0" title="Вернуться в CRM панель">
-              <span>👑</span>
-              <span>В CRM</span>
-            </button>
             <button onclick="manualRefreshData()" class="py-2 px-2.5 bg-emerald-deep/10 text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-emerald-deep/20 transition active:scale-95 shrink-0" title="Обновить данные">
               <i data-lucide="refresh-cw" class="w-4 h-4 refresh-spin-icon"></i>
             </button>
@@ -2428,7 +2424,15 @@
             </button>
           </div>
 
-          <div class="grid grid-cols-2 gap-2 w-full sm:w-auto">
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 w-full sm:w-auto">
+            <button type="button" onclick="openDispatcherPrintModal()" class="py-2 px-2.5 sm:px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow hover:bg-emerald-hover transition min-h-[40px] truncate" title="Быстрая печать чека (80мм/А4)">
+              <i data-lucide="printer" class="w-4 h-4 shrink-0"></i>
+              <span class="truncate">Печать чека</span>
+            </button>
+            <button type="button" onclick="toggleDispatcherCourierMonitor()" id="btn-toggle-courier-monitor" class="py-2 px-2.5 sm:px-3 bg-white text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs hover:bg-butter transition min-h-[40px] truncate" title="Посмотреть статус и местоположение курьеров">
+              <i data-lucide="truck" class="w-4 h-4 shrink-0"></i>
+              <span class="truncate">Где курьеры (GPS)</span>
+            </button>
             <button onclick="openRouteOptimizerModal('all')" class="py-2 px-2.5 sm:px-3 bg-white text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs hover:bg-butter transition min-h-[40px] truncate" title="Оптимизировать маршрут объезда (TSP)">
               <span>🧭</span>
               <span class="truncate">Маршруты (TSP)</span>
@@ -2438,6 +2442,39 @@
               <span class="truncate">Рассылка</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      <!-- Dispatcher Courier Monitor & GPS Radar (Где курьеры и чем заняты) -->
+      <div id="disp-courier-monitor-section" class="theme-card border border-emerald-deep/20 rounded-2xl p-3 sm:p-4 shadow-sm space-y-3 shrink-0">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-deep/10 pb-2">
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-600 animate-pulse"></span>
+            <h3 class="font-serif text-sm sm:text-base font-bold text-emerald-deep flex items-center gap-1.5">
+              <span>🚚 Экипажи & Курьеры онлайн</span>
+            </h3>
+            <span id="disp-couriers-online-badge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Загрузка...</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="refreshDispatcherCourierMonitor()" class="py-1 px-2.5 text-[11px] font-bold rounded-lg bg-emerald-deep/10 text-emerald-deep hover:bg-emerald-deep/20 transition flex items-center gap-1" title="Обновить местоположение экипажей">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5 refresh-spin-icon"></i>
+              <span>Обновить GPS</span>
+            </button>
+            <button type="button" onclick="toggleDispatcherCourierMap()" id="btn-disp-map-toggle" class="py-1 px-2.5 text-[11px] font-bold rounded-lg bg-emerald-deep text-butter hover:bg-emerald-hover transition flex items-center gap-1 shadow-xs" title="Открыть карту Самарканда с курьерами">
+              <i data-lucide="map-pin" class="w-3.5 h-3.5"></i>
+              <span id="disp-map-toggle-text">🗺️ Открыть карту</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Couriers Cards Grid: Live Activity & Status -->
+        <div id="disp-couriers-live-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <!-- Rendered via JS -->
+        </div>
+
+        <!-- Dispatcher Interactive Map Container (Toggleable) -->
+        <div id="disp-courier-map-wrapper" class="hidden pt-2">
+          <div id="disp-courier-map" class="w-full h-[360px] sm:h-[420px] rounded-xl border border-emerald-deep/20 relative z-0 shadow-inner overflow-hidden" style="isolation: isolate;"></div>
         </div>
       </div>
 
@@ -2514,12 +2551,8 @@
         </div>
 
         <div class="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto shrink-0">
-          <!-- Row 1: In cash + Refresh + Logout (and Admin return button if admin) -->
+          <!-- Row 1: In cash + Refresh + Logout -->
           <div class="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
-            <button id="btn-courier-to-admin" onclick="applyRoleWindow('admin')" class="hidden py-2 px-3 bg-emerald-deep text-butter border border-butter/30 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-emerald-hover transition shadow-xs shrink-0" title="Вернуться в CRM панель">
-              <span>👑</span>
-              <span>В CRM</span>
-            </button>
             <div class="bg-emerald-deep/5 px-3 py-1.5 rounded-xl border border-emerald-deep/15 flex items-center gap-2 flex-1 sm:flex-none justify-between sm:justify-start">
               <span class="text-[10px] text-charcoal-muted uppercase font-bold">В кассе:</span>
               <span id="courier-pocket-cash" class="text-xs sm:text-sm font-bold font-mono text-emerald-deep">0 сум</span>
@@ -2679,10 +2712,6 @@
             <i data-lucide="send" class="w-4 h-4"></i>
             <span>Telegram Группа</span>
           </a>
-          <button id="btn-washer-to-admin" onclick="applyRoleWindow('admin')" class="hidden py-2.5 px-3.5 bg-white/15 hover:bg-white/25 text-butter border border-butter/30 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-sm shrink-0" title="Вернуться в CRM панель">
-            <span>👑</span>
-            <span>В CRM</span>
-          </button>
           <button onclick="logout()" class="py-2.5 px-3.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-400/40 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-sm shrink-0">
             <i data-lucide="log-out" class="w-4 h-4"></i>
             <span>Выйти</span>
@@ -3303,6 +3332,41 @@
           Отправить в Telegram
         </button>
       </form>
+    </div>
+  </div>
+
+  <!-- DISPATCHER PRINT RECEIPT MODAL -->
+  <div id="modal-dispatcher-print-receipt" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <div class="theme-card border-2 border-emerald-deep/30 rounded-3xl p-5 max-w-md w-full shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-emerald-deep/15 pb-3">
+        <h3 class="font-serif text-lg font-bold text-emerald-deep flex items-center gap-2">
+          <i data-lucide="printer" class="w-5 h-5 text-emerald-deep"></i>
+          <span>Печать чека / накладной</span>
+        </h3>
+        <button onclick="closeModal('modal-dispatcher-print-receipt')" class="text-charcoal-muted hover:text-emerald-deep p-1">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="font-bold text-charcoal-muted">Выберите заказ для печати:</label>
+          <select id="disp-print-order-select" onchange="previewDispatcherReceiptForSelectedOrder()" class="w-full mt-1 p-2 rounded-xl border border-emerald-deep/20 bg-white font-semibold text-emerald-deep">
+            <!-- Populated via JS -->
+          </select>
+        </div>
+        <div id="disp-print-order-preview" class="p-3 bg-emerald-deep/5 rounded-2xl border border-emerald-deep/15 space-y-1.5">
+          <!-- Order summary preview populated via JS -->
+        </div>
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <button type="button" onclick="executeDispatcherPrint()" class="w-full py-2.5 bg-emerald-deep text-butter font-bold rounded-xl text-xs hover:bg-emerald-hover transition shadow flex items-center justify-center gap-2">
+            <i data-lucide="printer" class="w-4 h-4"></i>
+            <span>Печать (80мм)</span>
+          </button>
+          <button type="button" onclick="closeModal('modal-dispatcher-print-receipt')" class="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-charcoal-deep font-bold rounded-xl text-xs transition">
+            Отмена
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
