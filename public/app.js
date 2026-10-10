@@ -3641,6 +3641,17 @@ async function loadIntegrationSettings() {
   try {
     const res = await fetch('/api/settings');
     const settings = await res.json();
+    window.currentCompanySettings = settings;
+
+    // Company profile & contacts
+    const compNameEl = document.getElementById('company-name-input');
+    const compPhoneEl = document.getElementById('company-phone-input');
+    const compCourierPhoneEl = document.getElementById('company-courier-phone-input');
+    const compAddressEl = document.getElementById('company-address-input');
+    if (compNameEl) compNameEl.value = settings.company_name || 'COSMO CRM';
+    if (compPhoneEl) compPhoneEl.value = settings.company_phone || '+998 95 032 33 30';
+    if (compCourierPhoneEl) compCourierPhoneEl.value = settings.courier_phone || '+998 20 002 20 99';
+    if (compAddressEl) compAddressEl.value = settings.company_address || 'г. Самарканд, ул. Мирзо Улугбека, 45';
 
     const tgToken = document.getElementById('tg-bot-token');
     const tgChat = document.getElementById('tg-chat-id');
@@ -3683,7 +3694,6 @@ async function loadIntegrationSettings() {
         statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-300 flex items-center gap-1.5';
         statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span><span>Не подключен</span>';
       }
-      return;
     }
     if (false) {
       if (settings.eskiz_token) {
@@ -3793,6 +3803,41 @@ function updateSheetsBadge(isConnected) {
     badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span> Не настроено';
   }
 }
+
+async function saveCompanyProfileSettings() {
+  const name = document.getElementById('company-name-input')?.value?.trim() || 'COSMO CRM';
+  const phone = document.getElementById('company-phone-input')?.value?.trim() || '+998 95 032 33 30';
+  const courierPhone = document.getElementById('company-courier-phone-input')?.value?.trim() || '+998 20 002 20 99';
+  const address = document.getElementById('company-address-input')?.value?.trim() || 'г. Самарканд, ул. Мирзо Улугбека, 45';
+
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        company_name: name,
+        company_phone: phone,
+        courier_phone: courierPhone,
+        company_address: address
+      })
+    });
+    if (res.ok) {
+      window.currentCompanySettings = {
+        ...(window.currentCompanySettings || {}),
+        company_name: name,
+        company_phone: phone,
+        courier_phone: courierPhone,
+        company_address: address
+      };
+      showToast('✅ Реквизиты и контакты компании успешно сохранены!');
+    } else {
+      showToast('Ошибка сохранения реквизитов', 'error');
+    }
+  } catch (e) {
+    showToast('Ошибка сети: ' + e.message, 'error');
+  }
+}
+window.saveCompanyProfileSettings = saveCompanyProfileSettings;
 
 async function saveGoogleSheetsSettings() {
   const url = document.getElementById('sheets-webhook-url')?.value?.trim();
@@ -4311,7 +4356,7 @@ async function testSmsMessage() {
     });
   }
 
-  const phone = prompt('Введите номер телефона для отправки тестового SMS (+998XXXXXXXXX):', '+998901234567');
+  const phone = prompt('Введите номер телефона для отправки тестового SMS (+998XXXXXXXXX):', '+998950323330');
   if (!phone) return;
 
   try {
@@ -5306,20 +5351,21 @@ async function renderDispatcherCourierMonitor() {
   } catch (e) {}
 
   // 2. Identify all couriers (from staff + active orders + locations)
+  const defaultCourierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
   const couriersList = [];
   const staffCouriers = allStaff.filter(s => s.role === 'courier');
-  staffCouriers.forEach(s => couriersList.push({ name: s.name, phone: s.phone || '+998 90 777-88-99' }));
+  staffCouriers.forEach(s => couriersList.push({ name: s.name, phone: s.phone || defaultCourierPhone }));
 
   // Add default courier if staff list is empty
   if (couriersList.length === 0) {
-    couriersList.push({ name: 'Дамир (Курьер / Доставка)', phone: '+998 90 777-88-99' });
+    couriersList.push({ name: 'Дамир (Курьер / Доставка)', phone: defaultCourierPhone });
   }
 
   // Find any courier mentioned in orders
   activeOrders.forEach(o => {
     const cn = cleanCourierName(o.courier_name);
     if (cn && !couriersList.some(c => c.name.toLowerCase().includes(cn.toLowerCase()) || cn.toLowerCase().includes(c.name.toLowerCase()))) {
-      couriersList.push({ name: cn, phone: '+998 90 777-88-99' });
+      couriersList.push({ name: cn, phone: defaultCourierPhone });
     }
   });
 
@@ -5699,7 +5745,8 @@ async function sendQuickSmsToOrder(orderId) {
   const order = activeOrders.find(o => o.id === orderId);
   if (!order) return;
 
-  const defaultMsg = `Уважаемый(ая) ${order.client_name}! Ваш заказ #${order.id} на стирку ковров принят. BAROKOT CLEANING: +998 90 123-45-67`;
+  const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 95 032 33 30';
+  const defaultMsg = `Уважаемый(ая) ${order.client_name}! Ваш заказ #${order.id} на стирку ковров принят. COSMO CLEANING: ${companyPhone}`;
   const msg = prompt(`Отправка SMS клиенту (${order.client_phone}):`, defaultMsg);
   if (!msg) return;
 
@@ -7423,12 +7470,16 @@ function printOrderReceipt(orderId) {
 
   const items = order.carpets && order.carpets.length > 0 ? order.carpets : [{ name: 'Ковры', unit: 'м²', qty: 1, total: totalSum }];
 
+  const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 95 032 33 30';
+  const courierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
+  const courierDisplay = `${escapeHtml(order.courier_name || 'Дамир')} (Тел: ${courierPhone})`;
+
   const html = `
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.35; color: #000; width: 76mm; margin: 0 auto;">
       <div style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px;">
         <div style="font-size: 18px; font-weight: 900; letter-spacing: 1px;">COSMO CRM</div>
         <div style="font-size: 10px; font-weight: 700;">ПРОФЕССИОНАЛЬНАЯ СТИРКА КОВРОВ</div>
-        <div style="font-size: 9px; margin-top: 2px;">Тел: +998 90 123-45-67 • Самарканд</div>
+        <div style="font-size: 10px; font-weight: 800; margin-top: 2px;">Тел: ${companyPhone} • Самарканд</div>
       </div>
 
       <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 13px; margin-bottom: 4px;">
@@ -7441,7 +7492,7 @@ function printOrderReceipt(orderId) {
         <div><b>Клиент:</b> ${escapeHtml(order.client_name)}</div>
         <div><b>Тел:</b> ${escapeHtml(order.client_phone)}</div>
         <div><b>Адрес:</b> ${escapeHtml(order.client_address)}</div>
-        <div><b>Экипаж / Курьер:</b> ${escapeHtml(order.courier_name || 'Дамир')}</div>
+        <div><b>Экипаж / Курьер:</b> ${courierDisplay}</div>
       </div>
 
       <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 6px;">
@@ -7492,8 +7543,9 @@ function printOrderReceipt(orderId) {
         <div style="font-size: 8px;">Наведите камеру смартфона для отслеживания</div>
       </div>
 
-      <div style="font-size: 8px; text-align: center; margin-top: 8px; color: #444; border-top: 1px solid #000; padding-top: 4px;">
-        Спасибо за доверие! Ковры проходят сушку в термокамере и антибактериальную обработку.
+      <div style="font-size: 9px; text-align: center; margin-top: 8px; color: #111; border-top: 1px solid #000; padding-top: 4px;">
+        <div style="font-weight: 800;">Горячая линия: ${companyPhone} • Курьер: ${courierPhone}</div>
+        <div style="font-size: 8px; color: #444; margin-top: 2px;">Спасибо за доверие! Ковры проходят сушку в термокамере и антибактериальную обработку.</div>
       </div>
     </div>
   `;
@@ -7564,8 +7616,9 @@ async function showPublicTrackingScreen(orderId) {
     const order = await res.json();
 
     document.getElementById('track-client-name').textContent = order.client_name;
-    document.getElementById('track-client-address').textContent = order.client_address + (order.landmark ? ` (${order.landmark})` : '');
-    document.getElementById('track-courier-name').textContent = order.courier_name || 'Экипаж BAROKOT';
+    const courierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
+    const courierName = order.courier_name || 'Дамир (Экипаж доставки)';
+    document.getElementById('track-courier-name').textContent = `${courierName} (${courierPhone})`;
     document.getElementById('track-total-price').textContent = (order.total_price || 0).toLocaleString() + ' сум';
 
     const payBadge = document.getElementById('track-payment-badge');

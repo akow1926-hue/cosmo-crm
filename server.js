@@ -309,9 +309,9 @@ async function initDatabase() {
   if (!isSeededRow) {
     const empRow = await db.get('SELECT COUNT(*) as count FROM employees');
     if (!empRow || empRow.count === 0) {
-      await db.run('INSERT INTO employees (name, role, pin, phone, base_salary, status) VALUES (?, ?, ?, ?, ?, ?)', ['Акобир (Руководитель)', 'admin', '0000', '+998 90 123-45-67', 6000000, 'active']);
+      await db.run('INSERT INTO employees (name, role, pin, phone, base_salary, status) VALUES (?, ?, ?, ?, ?, ?)', ['Акобир (Руководитель)', 'admin', '0000', '+998 95 032 33 30', 6000000, 'active']);
       await db.run('INSERT INTO employees (name, role, pin, phone, base_salary, status) VALUES (?, ?, ?, ?, ?, ?)', ['Мадина (Диспетчер)', 'dispatcher', '1111', '+998 91 555-44-33', 3500000, 'active']);
-      await db.run('INSERT INTO employees (name, role, pin, phone, base_salary, status) VALUES (?, ?, ?, ?, ?, ?)', ['Дамир (Курьер / Доставка)', 'courier', '2222', '+998 90 777-88-99', 4500000, 'active']);
+      await db.run('INSERT INTO employees (name, role, pin, phone, base_salary, status) VALUES (?, ?, ?, ?, ?, ?)', ['Дамир (Курьер / Доставка)', 'courier', '2222', '+998 20 002 20 99', 4500000, 'active']);
       await db.run('INSERT INTO employees (name, role, pin, phone, base_salary, status) VALUES (?, ?, ?, ?, ?, ?)', ['Шерзод (Мастер цеха)', 'washer', '3333', '+998 93 333-22-11', 4000000, 'active']);
     }
     await db.run("INSERT INTO settings (key, value) VALUES ('initial_staff_seeded', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
@@ -321,16 +321,16 @@ async function initDatabase() {
   const svcRow = await db.get('SELECT COUNT(*) as count FROM services');
   if (!svcRow || svcRow.count === 0) {
     const services = [
-      ['S-1', 'Gilam Standart', 'Ковры', 'м²', 14000, 'Layers'],
-      ['S-2', 'Gilam Srochna', 'Ковры', 'м²', 20000, 'Sparkles'],
+      ['S-1', 'Gilam Standart', 'Ковры', 'м²', 16000, 'Layers'],
+      ['S-2', 'Gilam Srochna', 'Ковры', 'м²', 22000, 'Sparkles'],
       ['S-3', 'Gilam No standart (Шёлк / Ручной)', 'Ковры', 'м²', 25000, 'Layers'],
       ['S-4', 'Kurpacha', 'Текстиль', 'метр', 15000, 'Bed'],
-      ['S-5', 'Kurpa (Одеяло стеганое)', 'Текстиль', 'шт', 70000, 'Bed'],
-      ['S-6', 'Adyol (1-спальный плед)', 'Текстиль', 'шт', 50000, 'Bed'],
-      ['S-7', 'Adyol (2-спальный евро)', 'Текстиль', 'шт', 70000, 'Bed'],
+      ['S-5', 'Kurpa (Одеяло стеганое)', 'Текстиль', 'шт', 80000, 'Bed'],
+      ['S-6', 'Adyol (1-спальный плед)', 'Текстиль', 'шт', 60000, 'Bed'],
+      ['S-7', 'Adyol (2-спальный евро)', 'Текстиль', 'шт', 80000, 'Bed'],
       ['S-8', 'Yostiq (Подушка пуховая)', 'Текстиль', 'шт', 15000, 'Feather'],
-      ['S-9', 'Parda Vilur (Бархатные шторы)', 'Шторы', 'метр', 18000, 'Sun'],
-      ['S-10', 'Parda Tur (Тюль)', 'Шторы', 'метр', 15000, 'Sun'],
+      ['S-9', 'Parda Vilur (Бархатные шторы)', 'Шторы', 'метр', 20000, 'Sun'],
+      ['S-10', 'Parda Tur (Тюль)', 'Шторы', 'метр', 18000, 'Sun'],
       ['S-11', 'Overlok (Обработка края)', 'Доп. услуги', 'метр', 20000, 'Tag']
     ];
     for (const s of services) {
@@ -347,7 +347,8 @@ async function initDatabase() {
   };
 
   await setSettingIfMissing('company_name', 'COSMO CRM');
-  await setSettingIfMissing('company_phone', '+998 90 123-45-67');
+  await setSettingIfMissing('company_phone', '+998 95 032 33 30');
+  await setSettingIfMissing('courier_phone', '+998 20 002 20 99');
   await setSettingIfMissing('company_address', 'г. Самарканд, ул. Мирзо Улугбека, 45');
   await setSettingIfMissing('tg_bot_token', '');
   await setSettingIfMissing('tg_chat_id', '');
@@ -355,6 +356,14 @@ async function initDatabase() {
   await setSettingIfMissing('eskiz_token', '');
   await setSettingIfMissing('eskiz_from', '4546');
   await setSettingIfMissing('google_sheets_webhook_url', 'https://script.google.com/macros/s/AKfycbz74Jtn1LCkIrtwDYjJegO0wstTqMPUoiY7B0xxr30sicHdpGofrILWO7qVrCbrAoVP/exec');
+
+  // Принудительное обновление актуальных контактов компании и курьера
+  try {
+    await db.run("UPDATE settings SET value = '+998 95 032 33 30' WHERE key = 'company_phone'");
+    await db.run("UPDATE settings SET value = '+998 20 002 20 99' WHERE key = 'courier_phone'");
+    await db.run("UPDATE employees SET phone = '+998 20 002 20 99' WHERE role = 'courier'");
+    await db.run("UPDATE employees SET phone = '+998 95 032 33 30' WHERE role = 'admin'");
+  } catch (e) {}
 
   // Очистка локальной таблицы orders (система работает исключительно с Google Таблицами)
   try {
@@ -855,7 +864,7 @@ async function syncOrdersFromGoogleSheets(force = false) {
       const createdAt = String(r[1] || '').trim() || new Date().toLocaleDateString('ru-RU');
       const clientName = cleanMojibake(String(r[2] || '').trim());
       const rawPhone = String(r[3] || '').replace(/^'/, '').trim();
-      const clientPhone = rawPhone.startsWith('#') ? '+998 90 123-45-67' : rawPhone;
+      const clientPhone = rawPhone.startsWith('#') ? '+998 95 032 33 30' : rawPhone;
       const clientAddress = cleanMojibake(String(r[4] || '').trim());
       const district = cleanMojibake(String(r[5] || 'Сиёб').trim()) || 'Сиёб';
       const totalM2 = parseFloat(String(r[7] || '').replace(',', '.')) || 0;
@@ -2354,8 +2363,8 @@ app.post('/api/sms/send', async (req, res) => {
 
 app.post('/api/sms/test', async (req, res) => {
   const { phone, message } = req.body;
-  const testPhone = phone || '+998901234567';
-  const msg = message || `Assalomu alaykum Test\n\nBuyurtmangiz qabul qilindi: #TEST\nHolati: Qabul qilindi\nKuryer: Haydovchi\n\nBuyurtmani kuzatish: https://barokot-crm.vercel.app\n\nBuyurtmangiz tayyor bo'lishi bilan haydovchimiz siz bilan bog'lanadi.\n\nHurmat bilan, Barokot.uz\nGilam yuvish markazi\n+998 20 002 2099`;
+  const testPhone = phone || '+998950323330';
+  const msg = message || `Assalomu alaykum Test\n\nBuyurtmangiz qabul qilindi: #TEST\nHolati: Qabul qilindi\nKuryer: Haydovchi\n\nBuyurtmani kuzatish: https://crmcosmo.company\n\nBuyurtmangiz tayyor bo'lishi bilan haydovchimiz siz bilan bog'lanadi.\n\nHurmat bilan, Cosmo CRM\nGilam yuvish markazi\n+998 20 002 20 99`;
   const result = await sendEskizSms(testPhone, msg);
   res.json(result);
 });
@@ -2487,7 +2496,7 @@ app.post('/api/integrations/google-sheets/test', async (req, res) => {
     id: 'CSM-TEST',
     created_at: new Date().toLocaleDateString('ru-RU'),
     client_name: 'Тестовый Клиент (COSMO CRM)',
-    client_phone: '+998 90 123-45-67',
+    client_phone: '+998 95 032 33 30',
     client_address: 'г. Самарканд, ул. Регистан, 1',
     district: 'Сиёб',
     stage: 'pickup',

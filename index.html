@@ -997,7 +997,7 @@
         </div>
         <div class="flex justify-between items-center text-xs">
           <span class="text-charcoal-muted">Курьер экипажа:</span>
-          <span id="track-courier-name" class="font-bold text-emerald-deep">Дамир (+998 90 777-88-99)</span>
+          <span id="track-courier-name" class="font-bold text-emerald-deep">Дамир (+998 20 002 20 99)</span>
         </div>
 
         <!-- Carpets items list -->
@@ -1041,7 +1041,7 @@
 
       <!-- Direct Contact Buttons -->
       <div class="grid grid-cols-2 gap-3">
-        <a href="tel:+998901234567" class="py-2.5 px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow hover:bg-emerald-hover">
+        <a href="tel:+998950323330" class="py-2.5 px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow hover:bg-emerald-hover">
           <i data-lucide="phone-call" class="w-4 h-4"></i>
           Позвонить в цех
         </a>
@@ -2034,6 +2034,49 @@
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <!-- Company Profile & Contact Details Card -->
+          <div class="col-span-1 md:col-span-2 theme-card border border-emerald-deep/20 rounded-2xl p-5 shadow-sm space-y-4">
+            <div class="flex flex-wrap items-center justify-between border-b border-emerald-deep/15 pb-3 gap-2">
+              <div class="flex items-center gap-2">
+                <div class="w-9 h-9 rounded-xl bg-emerald-deep text-butter flex items-center justify-center font-bold text-sm shadow shrink-0">
+                  🏢
+                </div>
+                <div>
+                  <h3 class="font-serif text-lg font-bold text-emerald-deep">
+                    Реквизиты и контакты компании
+                  </h3>
+                  <p class="text-[11px] text-charcoal-muted">Отображаются в печатных чеках, SMS-сообщениях и на странице онлайн-трекинга клиентов</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+              <div>
+                <label class="font-bold text-charcoal-muted">Название компании:</label>
+                <input type="text" id="company-name-input" value="COSMO CRM" class="w-full mt-1 p-2.5 rounded-xl border border-emerald-deep/20 bg-white font-bold text-emerald-950 text-xs">
+              </div>
+              <div>
+                <label class="font-bold text-charcoal-muted">Горячая линия компании (Чек / Поддержка):</label>
+                <input type="text" id="company-phone-input" value="+998 95 032 33 30" class="w-full mt-1 p-2.5 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold text-emerald-950 text-xs">
+              </div>
+              <div>
+                <label class="font-bold text-charcoal-muted">Номер телефона курьера (Экипаж / Доставка):</label>
+                <input type="text" id="company-courier-phone-input" value="+998 20 002 20 99" class="w-full mt-1 p-2.5 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold text-emerald-950 text-xs">
+              </div>
+              <div>
+                <label class="font-bold text-charcoal-muted">Адрес предприятия / Фабрики:</label>
+                <input type="text" id="company-address-input" value="г. Самарканд, ул. Мирзо Улугбека, 45" class="w-full mt-1 p-2.5 rounded-xl border border-emerald-deep/20 bg-white font-medium text-xs">
+              </div>
+            </div>
+
+            <div class="pt-2 flex items-center justify-end">
+              <button type="button" onclick="saveCompanyProfileSettings()" class="py-2.5 px-5 bg-emerald-deep text-butter font-bold rounded-xl text-xs hover:bg-emerald-hover transition shadow flex items-center gap-1.5">
+                <i data-lucide="save" class="w-4 h-4"></i>
+                <span>Сохранить реквизиты</span>
+              </button>
+            </div>
+          </div>
+
           <!-- Google Sheets Auto-Sync Card -->
           <div class="col-span-1 md:col-span-2 theme-card border border-emerald-deep/20 rounded-2xl p-5 shadow-sm space-y-4">
             <div class="flex flex-wrap items-center justify-between border-b border-emerald-deep/15 pb-3 gap-2">
@@ -2805,7 +2848,7 @@
           </div>
           <div>
             <label class="font-bold text-charcoal-muted">Телефон клиента *</label>
-            <input type="text" id="order-client-phone" required placeholder="+998 90 123-45-67" class="w-full mt-1 p-2 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold">
+            <input type="text" id="order-client-phone" required placeholder="+998 90 000-00-00" class="w-full mt-1 p-2 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold">
           </div>
         </div>
 
@@ -3215,7 +3258,7 @@
         </div>
         <div>
           <label class="font-bold text-charcoal-muted">Номер телефона *</label>
-          <input type="text" id="client-modal-phone" required placeholder="+998 90 123-45-67" class="w-full mt-1 p-2 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold">
+          <input type="text" id="client-modal-phone" required placeholder="+998 90 000-00-00" class="w-full mt-1 p-2 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold">
         </div>
         <div>
           <label class="font-bold text-charcoal-muted">Адрес</label>
