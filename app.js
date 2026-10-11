@@ -31,7 +31,7 @@ let suggestedGeoAddress = null;
 let reverseGeocodeTimer = null;
 let activePickupModalOrder = null;
 
-const WORKSHOP_COORDINATES = [39.588238, 66.928319]; // Главный цех BAROKOT Самарканд
+const WORKSHOP_COORDINATES = [39.588503, 66.928409]; // Главный технологический цех COSMO Самарканд
 const DISTRICT_CENTERS = {
   // Городские районы
   'Бульвар / Центр': [39.6542, 66.9597],
@@ -2631,8 +2631,8 @@ async function refreshMapMarkers() {
     html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:bold; font-size:11px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,0.3);">🏭 ЦЕХ COSMO CRM</div>`,
     iconSize: [110, 30]
   });
-  const plantMarker = L.marker([39.6542, 66.9597], { icon: plantIcon }).addTo(leafletMap)
-    .bindPopup('<b>Главный технологический цех COSMO CRM</b><br>Самарканд, ул. Мирзо Улугбека');
+  const plantMarker = L.marker(WORKSHOP_COORDINATES, { icon: plantIcon }).addTo(leafletMap)
+    .bindPopup(`<b>🏭 Главный технологический цех COSMO CRM</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#04222B; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Проложить маршрут в Яндекс</a>`);
   mapMarkers.push(plantMarker);
 
   // Plot active orders
@@ -6145,8 +6145,8 @@ function updateDispatcherCourierMapMarkers(locations = []) {
     html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:bold; font-size:10px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,0.3);">🏭 ЦЕХ COSMO</div>`,
     iconSize: [95, 26]
   });
-  const pm = L.marker([39.6542, 66.9597], { icon: plantIcon }).addTo(dispCourierMap)
-    .bindPopup('<b>Главный технологический цех COSMO CRM</b><br>Самарканд, ул. Мирзо Улугбека');
+  const pm = L.marker(WORKSHOP_COORDINATES, { icon: plantIcon }).addTo(dispCourierMap)
+    .bindPopup(`<b>🏭 Главный технологический цех COSMO CRM</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#04222B; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Проложить маршрут в Яндекс</a>`);
   dispCourierMarkers.push(pm);
 
   // Active orders markers
@@ -6859,6 +6859,17 @@ function initCourierPortalMap() {
 
   courierMapMarkers.forEach(m => courierPortalMap.removeLayer(m));
   courierMapMarkers = [];
+
+  // База / Главный цех курьера
+  const workshopIcon = L.divIcon({
+    className: 'workshop-courier-pin',
+    html: `<div style="background-color: #04222B; color: #98D8D0; border: 2px solid white; border-radius: 12px; padding: 4px 8px; font-weight: bold; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); white-space: nowrap;">🏭 Цех Cosmo</div>`,
+    iconSize: [88, 26],
+    iconAnchor: [44, 13]
+  });
+  const wsMarker = L.marker(WORKSHOP_COORDINATES, { icon: workshopIcon }).addTo(courierPortalMap)
+    .bindPopup(`<b>🏭 База / Главный цех Cosmo CRM</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#04222B; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Маршрут на базу в Яндекс</a>`);
+  courierMapMarkers.push(wsMarker);
 
   const myOrders = activeOrders.filter(o => 
     isOrderForCourier(o, currentUser) &&

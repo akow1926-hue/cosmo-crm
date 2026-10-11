@@ -357,6 +357,7 @@ async function initDatabase() {
   await setSettingIfMissing('eskiz_token', '');
   await setSettingIfMissing('eskiz_from', '4546');
   await setSettingIfMissing('google_sheets_webhook_url', 'https://script.google.com/macros/s/AKfycbz74Jtn1LCkIrtwDYjJegO0wstTqMPUoiY7B0xxr30sicHdpGofrILWO7qVrCbrAoVP/exec');
+  await db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('workshop_coordinates', '39.588503, 66.928409')");
 
   // Принудительное обновление актуальных контактов компании и курьера
   try {
