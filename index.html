@@ -14,6 +14,21 @@
   <link rel="manifest" href="/site.webmanifest">
   <meta name="theme-color" content="#04222B">
   <meta name="msapplication-TileColor" content="#04222B">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Cosmo CRM">
+
+  <!-- Instant Theme Initializer (Anti-FOUC) -->
+  <script>
+    (function() {
+      try {
+        var t = localStorage.getItem('cosmo_theme') || localStorage.getItem('barokot_theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+        if (t === 'dark') document.documentElement.classList.add('dark');
+        else document.documentElement.classList.remove('dark');
+      } catch (e) {}
+    })();
+  </script>
 
   <!-- Google Fonts: Cormorant Garamond, Montserrat, Plus Jakarta Sans, JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -445,13 +460,9 @@
     }
 
     /* Modals in Dark Mode */
-    body[data-theme="dark"] #modal-order > div,
-    body[data-theme="dark"] #modal-measure > div,
-    body[data-theme="dark"] #modal-delivery-complete > div,
-    body[data-theme="dark"] #modal-qr > div,
-    body[data-theme="dark"] #modal-advance > div,
-    body[data-theme="dark"] #modal-client > div,
-    body[data-theme="dark"] #modal-staff > div {
+    body[data-theme="dark"] [id^="modal-"] > div,
+    body[data-theme="dark"] .modal-content,
+    body[data-theme="dark"] .modal-dialog > div {
       background-color: #052129 !important;
       border: 1.5px solid rgba(79, 184, 180, 0.25) !important;
       color: #E2F4F0 !important;
@@ -507,25 +518,28 @@
       border-color: #4FB8B4 !important;
     }
 
-    /* Leaflet Map in Dark Mode */
-    body[data-theme="dark"] #logistics-map .leaflet-layer,
-    body[data-theme="dark"] #logistics-map .leaflet-control-zoom {
-      filter: invert(100%) hue-rotate(180deg) brightness(90%) contrast(85%);
+    /* All Leaflet Maps in Dark Mode */
+    [data-theme="dark"] .leaflet-container .leaflet-layer,
+    [data-theme="dark"] .leaflet-container .leaflet-control-zoom {
+      filter: invert(100%) hue-rotate(180deg) brightness(90%) contrast(85%) !important;
     }
 
-    body[data-theme="dark"] #logistics-map .leaflet-popup-content-wrapper,
-    body[data-theme="dark"] #logistics-map .leaflet-popup-tip {
+    [data-theme="dark"] .leaflet-container .leaflet-popup-content-wrapper,
+    [data-theme="dark"] .leaflet-container .leaflet-popup-tip {
       background: #052129 !important;
       color: #E2F4F0 !important;
       border: 1px solid rgba(79, 184, 180, 0.25) !important;
     }
 
-    body[data-theme="dark"] #logistics-map .leaflet-popup-content-wrapper a {
+    [data-theme="dark"] .leaflet-container .leaflet-popup-content-wrapper a,
+    [data-theme="dark"] .leaflet-container .leaflet-popup-content-wrapper b,
+    [data-theme="dark"] .leaflet-container .leaflet-popup-content-wrapper span {
       color: #4FB8B4 !important;
     }
 
-    body[data-theme="dark"] #logistics-map .leaflet-popup-content-wrapper b {
-      color: #4FB8B4 !important;
+    /* Pure Theme (Светлый Офисный) overrides */
+    body[data-theme="pure"] .bg-butter-surface {
+      background-color: #F8FAFC !important;
     }
 
     /* Fix Leaflet map z-index bleed: Isolate Leaflet stacking contexts */
@@ -1184,9 +1198,8 @@
         </button>
 
         <!-- Sun / Theme Toggle -->
-        <button onclick="toggleTheme()" id="btn-quick-theme-toggle" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#072632] hover:bg-[#0A3542] border border-[#0E4352] text-amber-400 transition shadow-inner flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Переключить тему">
-          <i data-lucide="sun" class="w-4 h-4"></i>
-          <span id="quick-theme-icon" class="hidden">☀️</span>
+        <button onclick="toggleTheme()" id="btn-quick-theme-toggle" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-amber-300 transition shadow-xs flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Переключить тему">
+          <span id="quick-theme-icon" class="text-sm select-none">🌓</span>
           <span id="quick-theme-label" class="hidden">Светлая</span>
         </button>
 
@@ -1366,20 +1379,20 @@
       <!-- ================= VIEW 1: DASHBOARD (ADMIN SUITE) ================= -->
       <section id="view-dashboard" class="space-y-6">
         <!-- Top Admin Welcome Header -->
-        <div class="p-4 sm:p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div class="theme-card border border-emerald-deep/20 rounded-2xl p-4 sm:p-5 shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div class="flex items-center gap-3.5">
-            <div class="w-12 h-12 rounded-2xl bg-[#03141D] border border-[#0E4352] text-[#00E5FF] flex items-center justify-center shadow-inner shrink-0">
+            <div class="w-12 h-12 rounded-2xl bg-emerald-deep/10 border border-emerald-deep/20 text-emerald-deep flex items-center justify-center shadow-xs shrink-0">
               <i data-lucide="shield-check" class="w-6 h-6"></i>
             </div>
             <div>
-              <div class="inline-block px-2.5 py-0.5 rounded-full bg-[#03141D] border border-[#0E4352] text-[10px] font-bold text-[#00E5FF] uppercase tracking-wider mb-1">
+              <div class="inline-block px-2.5 py-0.5 rounded-full bg-emerald-deep/10 text-[10px] font-bold text-emerald-deep uppercase tracking-wider mb-1">
                 ГЛАВНАЯ СВОДКА • РУКОВОДИТЕЛЬ
               </div>
-              <h2 class="text-lg sm:text-xl font-black text-white flex items-center gap-2">
+              <h2 class="text-lg sm:text-xl font-black text-emerald-deep flex items-center gap-2">
                 <span>Панель управления предприятием</span>
               </h2>
-              <div class="flex items-center gap-1.5 text-xs text-[#67B0C5] mt-0.5">
-                <span class="w-2 h-2 rounded-full bg-[#10B981] animate-pulse"></span>
+              <div class="flex items-center gap-1.5 text-xs text-charcoal-muted mt-0.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-600 animate-pulse"></span>
                 <span>Вся аналитика, касса, цех и заказы Самарканда</span>
               </div>
             </div>
@@ -1387,16 +1400,16 @@
 
           <!-- Quick Actions -->
           <div class="flex flex-wrap items-center gap-2.5">
-            <button onclick="openNewOrderModal()" class="py-2.5 px-4 bg-[#03141D] hover:bg-[#0A3542] border border-[#00E5FF]/40 text-[#00E5FF] hover:text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
-              <i data-lucide="plus-circle" class="w-4 h-4"></i>
+            <button onclick="openNewOrderModal()" class="py-2.5 px-4 bg-emerald-deep text-butter hover:bg-emerald-hover rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
+              <i data-lucide="plus-circle" class="w-4 h-4 text-butter"></i>
               <span>+ Новый заказ</span>
             </button>
-            <button onclick="switchTab('analytics')" class="py-2.5 px-4 bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] text-[#67B0C5] hover:text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
-              <i data-lucide="bar-chart-2" class="w-4 h-4 text-[#00E5FF]"></i>
+            <button onclick="switchTab('analytics')" class="py-2.5 px-4 bg-black/5 hover:bg-black/10 border border-emerald-deep/20 text-emerald-deep rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
+              <i data-lucide="bar-chart-2" class="w-4 h-4 text-emerald-deep"></i>
               <span>Аналитика</span>
             </button>
-            <button onclick="switchTab('orders')" class="py-2.5 px-5 bg-[#00B4D8] hover:bg-[#0096C7] text-white rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-md">
-              <i data-lucide="file-text" class="w-4 h-4"></i>
+            <button onclick="switchTab('orders')" class="py-2.5 px-5 bg-emerald-deep/10 hover:bg-emerald-deep/20 border border-emerald-deep/30 text-emerald-deep rounded-xl text-xs font-bold transition flex items-center gap-2 shadow-sm">
+              <i data-lucide="file-text" class="w-4 h-4 text-emerald-deep"></i>
               <span>Все заказы</span>
             </button>
           </div>
@@ -1405,62 +1418,62 @@
         <!-- 4 KPI Metrics Cards -->
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <!-- Card 1: Всего заказов -->
-          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
-            <div>
-              <div class="text-xs text-[#67B0C5] font-medium">Всего заказов</div>
-              <div id="stat-total-orders" class="text-2xl sm:text-3xl font-black text-white font-mono mt-0.5">0</div>
-              <div class="text-[11px] text-[#00E5FF] font-semibold mt-1 flex items-center gap-1">
+          <div class="theme-card border-2 border-emerald-deep/20 rounded-2xl p-4 shadow-sm flex items-center justify-between min-w-0">
+            <div class="min-w-0 flex-1 pr-2">
+              <div class="text-xs text-charcoal-muted font-bold uppercase truncate">Всего заказов</div>
+              <div id="stat-total-orders" class="text-2xl sm:text-3xl font-black text-emerald-deep font-mono mt-0.5 truncate">0</div>
+              <div class="text-[11px] text-charcoal-muted font-semibold mt-1 flex items-center gap-1 truncate">
                 <span>Площадь:</span>
-                <b id="stat-total-m2" class="font-mono text-white">0</b>
+                <b id="stat-total-m2" class="font-mono text-emerald-deep">0</b>
                 <span>м²</span>
               </div>
             </div>
-            <div class="w-12 h-12 rounded-full bg-[#00E5FF]/10 border border-[#00E5FF]/25 text-[#00E5FF] flex items-center justify-center shrink-0">
-              <i data-lucide="package" class="w-6 h-6"></i>
+            <div class="w-11 h-11 rounded-2xl bg-emerald-deep/10 border border-emerald-deep/20 text-emerald-deep flex items-center justify-center shrink-0">
+              <i data-lucide="package" class="w-5 h-5 text-emerald-deep"></i>
             </div>
           </div>
 
           <!-- Card 2: В цеху / стирка -->
-          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
-            <div>
-              <div class="text-xs text-[#67B0C5] font-medium">В цеху / стирка</div>
-              <div id="stat-washing-count" class="text-2xl sm:text-3xl font-black text-white font-mono mt-0.5">0</div>
-              <div class="text-[11px] text-[#00E5A3] font-semibold mt-1 flex items-center gap-1">
+          <div class="theme-card border-2 border-emerald-deep/20 rounded-2xl p-4 shadow-sm flex items-center justify-between min-w-0">
+            <div class="min-w-0 flex-1 pr-2">
+              <div class="text-xs text-charcoal-muted font-bold uppercase truncate">В цеху / стирка</div>
+              <div id="stat-washing-count" class="text-2xl sm:text-3xl font-black text-emerald-deep font-mono mt-0.5 truncate">0</div>
+              <div class="text-[11px] text-charcoal-muted font-semibold mt-1 flex items-center gap-1 truncate">
                 <span>Сушка / готовы:</span>
-                <b id="stat-drying-count" class="font-mono text-white">0</b>
+                <b id="stat-drying-count" class="font-mono text-emerald-deep">0</b>
               </div>
             </div>
-            <div class="w-12 h-12 rounded-full bg-[#00E5A3]/10 border border-[#00E5A3]/25 text-[#00E5A3] flex items-center justify-center shrink-0">
-              <i data-lucide="waves" class="w-6 h-6"></i>
+            <div class="w-11 h-11 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-blue-600 flex items-center justify-center shrink-0">
+              <i data-lucide="waves" class="w-5 h-5 text-blue-600"></i>
             </div>
           </div>
 
           <!-- Card 3: Выручка -->
-          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
-            <div>
-              <div class="text-xs text-[#67B0C5] font-medium">Общая выручка</div>
-              <div id="stat-total-revenue" class="text-xl sm:text-2xl font-black text-white font-mono mt-0.5 truncate max-w-[150px]">0 сум</div>
-              <div class="text-[11px] text-[#F59E0B] font-semibold mt-1 flex items-center gap-1">
+          <div class="theme-card border-2 border-emerald-deep/20 rounded-2xl p-4 shadow-sm flex items-center justify-between min-w-0">
+            <div class="min-w-0 flex-1 pr-2">
+              <div class="text-xs text-charcoal-muted font-bold uppercase truncate">Общая выручка</div>
+              <div id="stat-total-revenue" class="text-xl sm:text-2xl font-black text-emerald-deep font-mono mt-0.5 truncate">0 сум</div>
+              <div class="text-[11px] text-emerald-700 font-semibold mt-1 flex items-center gap-1 truncate">
                 <span>Оплачено:</span>
-                <b id="stat-paid-revenue" class="font-mono text-white">0</b>
+                <b id="stat-paid-revenue" class="font-mono text-emerald-deep">0</b>
               </div>
             </div>
-            <div class="w-12 h-12 rounded-full bg-[#F59E0B]/10 border border-[#F59E0B]/25 text-[#F59E0B] flex items-center justify-center shrink-0">
-              <i data-lucide="wallet" class="w-6 h-6"></i>
+            <div class="w-11 h-11 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-600 flex items-center justify-center shrink-0">
+              <i data-lucide="wallet" class="w-5 h-5 text-amber-600"></i>
             </div>
           </div>
 
           <!-- Card 4: Долги клиентов -->
-          <div class="p-4 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm flex items-center justify-between">
-            <div>
-              <div class="text-xs text-rose-300 font-medium">Долги клиентов</div>
-              <div id="stat-client-debts" class="text-xl sm:text-2xl font-black text-rose-400 font-mono mt-0.5 truncate max-w-[150px]">0 сум</div>
-              <div class="text-[11px] text-rose-400 font-semibold mt-1 cursor-pointer hover:underline" onclick="switchTab('finance')">
+          <div class="theme-card border-2 border-rose-300 rounded-2xl p-4 shadow-sm flex items-center justify-between min-w-0">
+            <div class="min-w-0 flex-1 pr-2">
+              <div class="text-xs text-rose-800 font-bold uppercase truncate">Долги клиентов</div>
+              <div id="stat-client-debts" class="text-xl sm:text-2xl font-black text-rose-600 font-mono mt-0.5 truncate">0 сум</div>
+              <div class="text-[11px] text-rose-700 font-semibold mt-1 cursor-pointer hover:underline truncate" onclick="switchTab('finance')">
                 Реестр долгов →
               </div>
             </div>
-            <div class="w-12 h-12 rounded-full bg-rose-500/10 border border-rose-500/25 text-rose-400 flex items-center justify-center shrink-0">
-              <i data-lucide="alert-circle" class="w-6 h-6"></i>
+            <div class="w-11 h-11 rounded-2xl bg-rose-500/10 border border-rose-500/25 text-rose-600 flex items-center justify-center shrink-0">
+              <i data-lucide="alert-circle" class="w-5 h-5 text-rose-600"></i>
             </div>
           </div>
         </div>
@@ -1468,13 +1481,13 @@
         <!-- Today's Schedule & Quick Action Cards -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <!-- Left: Urgent and Pending Orders -->
-          <div class="lg:col-span-2 p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm space-y-4">
-            <div class="flex items-center justify-between border-b border-[#0E4352]/60 pb-3">
+          <div class="lg:col-span-2 theme-card border border-emerald-deep/20 rounded-2xl p-5 shadow-sm space-y-4">
+            <div class="flex items-center justify-between border-b border-emerald-deep/10 pb-3">
               <div class="flex items-center gap-2">
-                <i data-lucide="alert-triangle" class="w-5 h-5 text-amber-400"></i>
-                <h3 class="text-base sm:text-lg font-bold text-white">Срочные и текущие заказы</h3>
+                <i data-lucide="alert-triangle" class="w-5 h-5 text-amber-500"></i>
+                <h3 class="text-base sm:text-lg font-bold text-emerald-deep">Срочные и текущие заказы</h3>
               </div>
-              <button onclick="switchTab('orders')" class="text-xs font-bold text-[#00E5FF] hover:underline flex items-center gap-1">
+              <button onclick="switchTab('orders')" class="text-xs font-bold text-emerald-deep hover:underline flex items-center gap-1">
                 <span>Все заказы</span>
                 <span>→</span>
               </button>
@@ -1485,14 +1498,14 @@
           </div>
 
           <!-- Right: Recent Activity / Audit Log -->
-          <div class="p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm space-y-4">
-            <div class="flex items-center justify-between border-b border-[#0E4352]/60 pb-3">
+          <div class="theme-card border border-emerald-deep/20 rounded-2xl p-5 shadow-sm space-y-4">
+            <div class="flex items-center justify-between border-b border-emerald-deep/10 pb-3">
               <div class="flex items-center gap-2">
-                <i data-lucide="activity" class="w-5 h-5 text-[#00E5FF]"></i>
-                <h3 class="text-base sm:text-lg font-bold text-white">Журнал операций</h3>
+                <i data-lucide="activity" class="w-5 h-5 text-emerald-deep"></i>
+                <h3 class="text-base sm:text-lg font-bold text-emerald-deep">Журнал операций</h3>
               </div>
-              <button onclick="loadInitialData()" class="p-1 rounded-lg hover:bg-white/5 text-[#67B0C5] hover:text-white transition" title="Обновить журнал">
-                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+              <button onclick="loadInitialData()" class="p-1 rounded-lg hover:bg-black/5 text-charcoal-muted hover:text-emerald-deep transition" title="Обновить журнал">
+                <i data-lucide="refresh-cw" class="w-4 h-4 text-emerald-deep"></i>
               </button>
             </div>
             <div id="dashboard-audit-list" class="space-y-3 text-xs">
@@ -1501,40 +1514,40 @@
           </div>
         </div>
 
-        <!-- Quick Actions Navigation Tiles matching Photo 1 -->
-        <div class="p-4 sm:p-5 rounded-2xl bg-[#072632] border border-[#0E4352] shadow-sm space-y-3.5">
-          <div class="flex items-center gap-2 border-b border-[#0E4352]/60 pb-2.5">
-            <i data-lucide="zap" class="w-4 h-4 text-[#00E5FF]"></i>
-            <h3 class="text-sm sm:text-base font-bold text-white">Быстрые разделы системы</h3>
+        <!-- Quick Actions Navigation Tiles -->
+        <div class="theme-card border border-emerald-deep/20 rounded-2xl p-4 sm:p-5 shadow-sm space-y-3.5">
+          <div class="flex items-center gap-2 border-b border-emerald-deep/10 pb-2.5">
+            <i data-lucide="zap" class="w-4 h-4 text-emerald-deep"></i>
+            <h3 class="text-sm sm:text-base font-bold text-emerald-deep">Быстрые разделы системы</h3>
           </div>
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <button onclick="openNewOrderModal()" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
-              <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
-                <i data-lucide="file-plus-2" class="w-5 h-5"></i>
+            <button onclick="openNewOrderModal()" class="p-3.5 rounded-xl bg-black/5 hover:bg-black/10 border border-emerald-deep/15 hover:border-emerald-deep text-left transition group">
+              <div class="w-9 h-9 rounded-xl bg-emerald-deep/10 text-emerald-deep flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                <i data-lucide="file-plus-2" class="w-5 h-5 text-emerald-deep"></i>
               </div>
-              <div class="text-xs font-bold text-white">Новый заказ</div>
-              <div class="text-[10px] text-[#67B0C5] mt-0.5">Создать заказ для клиента</div>
+              <div class="text-xs font-bold text-emerald-deep">Новый заказ</div>
+              <div class="text-[10px] text-charcoal-muted mt-0.5">Создать заказ для клиента</div>
             </button>
-            <button onclick="switchTab('clients')" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
-              <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
-                <i data-lucide="users" class="w-5 h-5"></i>
+            <button onclick="switchTab('clients')" class="p-3.5 rounded-xl bg-black/5 hover:bg-black/10 border border-emerald-deep/15 hover:border-emerald-deep text-left transition group">
+              <div class="w-9 h-9 rounded-xl bg-emerald-deep/10 text-emerald-deep flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                <i data-lucide="users" class="w-5 h-5 text-emerald-deep"></i>
               </div>
-              <div class="text-xs font-bold text-white">Клиенты</div>
-              <div class="text-[10px] text-[#67B0C5] mt-0.5">База клиентов и контакты</div>
+              <div class="text-xs font-bold text-emerald-deep">Клиенты</div>
+              <div class="text-[10px] text-charcoal-muted mt-0.5">База клиентов и контакты</div>
             </button>
-            <button onclick="switchTab('staff')" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
-              <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
-                <i data-lucide="user-check" class="w-5 h-5"></i>
+            <button onclick="switchTab('staff')" class="p-3.5 rounded-xl bg-black/5 hover:bg-black/10 border border-emerald-deep/15 hover:border-emerald-deep text-left transition group">
+              <div class="w-9 h-9 rounded-xl bg-emerald-deep/10 text-emerald-deep flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                <i data-lucide="user-check" class="w-5 h-5 text-emerald-deep"></i>
               </div>
-              <div class="text-xs font-bold text-white">Сотрудники</div>
-              <div class="text-[10px] text-[#67B0C5] mt-0.5">Персонал, оклады и PIN</div>
+              <div class="text-xs font-bold text-emerald-deep">Сотрудники</div>
+              <div class="text-[10px] text-charcoal-muted mt-0.5">Персонал, оклады и PIN</div>
             </button>
-            <button onclick="switchTab('analytics')" class="p-3.5 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] hover:border-[#00E5FF]/40 text-left transition group">
-              <div class="w-9 h-9 rounded-xl bg-[#00E5FF]/10 text-[#00E5FF] flex items-center justify-center mb-2 group-hover:scale-105 transition">
-                <i data-lucide="bar-chart-3" class="w-5 h-5"></i>
+            <button onclick="switchTab('analytics')" class="p-3.5 rounded-xl bg-black/5 hover:bg-black/10 border border-emerald-deep/15 hover:border-emerald-deep text-left transition group">
+              <div class="w-9 h-9 rounded-xl bg-emerald-deep/10 text-emerald-deep flex items-center justify-center mb-2 group-hover:scale-105 transition">
+                <i data-lucide="bar-chart-3" class="w-5 h-5 text-emerald-deep"></i>
               </div>
-              <div class="text-xs font-bold text-white">Отчёт</div>
-              <div class="text-[10px] text-[#67B0C5] mt-0.5">Статистика и графики</div>
+              <div class="text-xs font-bold text-emerald-deep">Отчёт</div>
+              <div class="text-[10px] text-charcoal-muted mt-0.5">Статистика и графики</div>
             </button>
           </div>
         </div>
@@ -2560,6 +2573,9 @@
         </div>
 
         <div class="flex flex-wrap items-center gap-2 shrink-0">
+          <button onclick="toggleTheme()" class="w-9 h-9 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] text-[#00E5FF] transition flex items-center justify-center active:scale-95" title="Сменить тему оформления">
+            <span class="portal-theme-icon text-sm">🌓</span>
+          </button>
           <button onclick="manualRefreshData()" class="w-9 h-9 rounded-xl bg-[#03141D] hover:bg-[#0A3542] border border-[#0E4352] text-[#00E5FF] transition flex items-center justify-center active:scale-95" title="Обновить данные">
             <i data-lucide="refresh-cw" class="w-4 h-4 refresh-spin-icon"></i>
           </button>
@@ -2760,6 +2776,14 @@
               <span class="text-[10px] text-charcoal-muted uppercase font-bold">В кассе:</span>
               <span id="courier-pocket-cash" class="text-xs sm:text-sm font-bold font-mono text-emerald-deep">0 сум</span>
             </div>
+            <button onclick="openCourierShiftModal()" class="py-2 px-3 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition shrink-0" title="Сдать вечернюю кассу / Z-отчёт">
+              <span>📊</span>
+              <span class="hidden sm:inline">Сдать кассу</span>
+              <span class="sm:hidden">Z-отчёт</span>
+            </button>
+            <button onclick="toggleTheme()" class="py-2 px-2.5 bg-emerald-deep/10 text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-emerald-deep/20 transition active:scale-95 shrink-0" title="Сменить тему оформления">
+              <span class="portal-theme-icon">🌓</span>
+            </button>
             <button onclick="manualRefreshData()" class="py-2 px-2.5 bg-emerald-deep/10 text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-emerald-deep/20 transition active:scale-95 shrink-0" title="Обновить заказы">
               <i data-lucide="refresh-cw" class="w-4 h-4 refresh-spin-icon"></i>
             </button>
@@ -2769,15 +2793,19 @@
             </button>
           </div>
 
-          <!-- Row 2: Route TSP + Street Order as 50/50 responsive buttons -->
-          <div class="grid grid-cols-2 gap-2 w-full sm:w-auto">
-            <button onclick="openRouteOptimizerModal('courier')" class="py-2 px-2.5 sm:px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow hover:bg-emerald-hover transition min-h-[40px] truncate" title="Оптимизировать маршрут объезда (TSP)">
+          <!-- Row 2: Route TSP + Street Order + Cash Handover as responsive buttons -->
+          <div class="grid grid-cols-3 gap-2 w-full sm:w-auto">
+            <button onclick="openRouteOptimizerModal('courier')" class="py-2 px-2 sm:px-2.5 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-1 shadow hover:bg-emerald-hover transition min-h-[40px] truncate" title="Оптимизировать маршрут объезда (TSP)">
               <span>🧭</span>
-              <span class="truncate">Маршрут (TSP)</span>
+              <span class="truncate">Маршрут</span>
             </button>
-            <button onclick="openStreetOrderModal()" class="py-2 px-2.5 sm:px-3 bg-butter text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow hover:bg-butter-dark transition min-h-[40px] truncate">
+            <button onclick="openStreetOrderModal()" class="py-2 px-2 sm:px-2.5 bg-butter text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold flex items-center justify-center gap-1 shadow hover:bg-butter-dark transition min-h-[40px] truncate">
               <i data-lucide="plus-circle" class="w-4 h-4 shrink-0"></i>
-              <span class="truncate">+ Заказ с улицы</span>
+              <span class="truncate">+ Улица</span>
+            </button>
+            <button onclick="openCourierShiftModal()" class="py-2 px-2 sm:px-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1 shadow transition active:scale-95 min-h-[40px] truncate" title="Сдать вечернюю кассу курьера">
+              <span>📊</span>
+              <span class="truncate">Сдать кассу</span>
             </button>
           </div>
         </div>
@@ -2915,6 +2943,9 @@
             <i data-lucide="send" class="w-4 h-4"></i>
             <span>Telegram Группа</span>
           </a>
+          <button onclick="toggleTheme()" class="py-2.5 px-3 bg-white/15 hover:bg-white/25 text-[#E2F4F0] border border-[#4FB8B4]/30 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-sm shrink-0" title="Сменить тему оформления">
+            <span class="portal-theme-icon">🌓</span>
+          </button>
           <button onclick="logout()" class="py-2.5 px-3.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-400/40 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-sm shrink-0">
             <i data-lucide="log-out" class="w-4 h-4"></i>
             <span>Выйти</span>
@@ -3324,6 +3355,97 @@
           </button>
           <button type="button" onclick="confirmDeliveryComplete()" class="py-2 px-5 bg-emerald-deep text-butter font-bold rounded-xl shadow hover:bg-emerald-hover">
             Закрыть заказ
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3.5 MODAL: COURIER EVENING SHIFT & Z-REPORT (ВЕЧЕРНЯЯ СДАЧА КАССЫ) -->
+  <div id="modal-courier-shift" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+    <div class="theme-card border-2 border-emerald-deep/30 rounded-3xl p-5 sm:p-6 max-w-lg w-full max-h-[92vh] overflow-y-auto custom-scrollbar shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-emerald-deep/15 pb-3">
+        <div class="flex items-center gap-2">
+          <span class="text-xl">📊</span>
+          <h3 class="font-serif text-lg sm:text-xl font-bold text-emerald-deep">Вечерняя сдача кассы & Z-отчёт</h3>
+        </div>
+        <button onclick="closeModal('modal-courier-shift')" class="text-charcoal-muted hover:text-emerald-deep p-1">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Courier & Date Selector / Info -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 bg-emerald-deep/5 p-3 rounded-2xl border border-emerald-deep/10 text-xs">
+        <div>
+          <label class="block text-[10px] uppercase font-bold text-charcoal-muted mb-1">Курьер:</label>
+          <div id="modal-shift-courier-display" class="font-bold text-emerald-deep text-sm truncate">Загрузка...</div>
+          <select id="modal-shift-courier-select" class="hidden w-full mt-1 p-2 rounded-xl border border-emerald-deep/20 bg-white font-semibold text-xs" onchange="reloadModalShiftData()">
+          </select>
+        </div>
+        <div>
+          <label class="block text-[10px] uppercase font-bold text-charcoal-muted mb-1">Дата смены:</label>
+          <input type="date" id="modal-shift-date-input" class="w-full p-2 rounded-xl border border-emerald-deep/20 bg-white font-mono font-bold text-xs" onchange="reloadModalShiftData()">
+        </div>
+      </div>
+
+      <!-- Shift Calculation Summary Box -->
+      <div id="modal-shift-body" class="space-y-3">
+        <!-- Rendered dynamically -->
+      </div>
+
+      <!-- Expenses & Fuel Input (Служебные расходы / ГСМ) -->
+      <div class="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3.5 space-y-2 text-xs">
+        <div class="font-bold text-amber-950 flex items-center justify-between">
+          <span class="flex items-center gap-1.5">
+            <span>⛽</span>
+            <span>Служебные расходы за смену (ГСМ / Авто / Обед):</span>
+          </span>
+          <span class="text-[10px] text-amber-800 font-normal">Вычитается из налички</span>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div class="sm:col-span-1">
+            <input type="number" id="modal-shift-expense-amount" placeholder="0 сум" class="w-full p-2 rounded-xl border border-amber-300 bg-white font-mono font-bold text-xs text-amber-900" oninput="recalcModalShiftNetCash()">
+          </div>
+          <div class="sm:col-span-2">
+            <input type="text" id="modal-shift-expense-desc" placeholder="Описание расхода (напр: Бензин 50 000 сум Лукойл)" class="w-full p-2 rounded-xl border border-amber-300 bg-white text-xs">
+          </div>
+        </div>
+      </div>
+
+      <!-- Highlighted Net Cash Handover Card -->
+      <div class="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-950 text-butter p-4 rounded-2xl shadow-md space-y-1">
+        <div class="flex items-center justify-between">
+          <div class="text-[11px] uppercase tracking-wider text-butter/80 font-bold">Итого чистых наличных к сдаче в кассу</div>
+          <span class="text-xs bg-butter/20 text-butter px-2 py-0.5 rounded-full font-mono font-bold">Z-ИТОГ</span>
+        </div>
+        <div class="text-2xl sm:text-3xl font-mono font-extrabold text-butter tracking-tight flex items-baseline gap-2">
+          <span id="modal-shift-net-cash-display">0</span>
+          <span class="text-sm font-sans font-bold text-butter/80">сум</span>
+        </div>
+        <div class="text-[10px] text-butter/70 font-mono" id="modal-shift-formula-display">
+          Формула: Собрано налом (0) - Расходы (0) = 0 сум
+        </div>
+      </div>
+
+      <!-- Courier Note -->
+      <div>
+        <label class="block text-[11px] font-bold text-charcoal-muted mb-1">Примечание / комментарий к сдаче:</label>
+        <input type="text" id="modal-shift-notes-input" placeholder="Например: Смена окончена, остаток наличных сдан в сейф" class="w-full p-2.5 rounded-xl border border-emerald-deep/20 bg-white text-xs">
+      </div>
+
+      <!-- Modal Footer Action Buttons -->
+      <div class="pt-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 border-t border-emerald-deep/15">
+        <button type="button" onclick="printModalZReport()" class="w-full sm:w-auto py-2.5 px-3.5 bg-white border border-emerald-deep/20 text-emerald-deep hover:bg-butter transition rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs">
+          <i data-lucide="printer" class="w-4 h-4"></i>
+          <span>Печать чека (80мм)</span>
+        </button>
+        <div class="flex items-center gap-2 w-full sm:w-auto">
+          <button type="button" onclick="closeModal('modal-courier-shift')" class="flex-1 sm:flex-none py-2.5 px-4 rounded-xl border border-emerald-deep/20 font-bold text-xs text-charcoal-muted hover:bg-black/5 transition">
+            Отмена
+          </button>
+          <button type="button" id="btn-submit-courier-shift" onclick="submitCourierShiftFromModal()" class="flex-1 sm:flex-none py-2.5 px-5 bg-emerald-deep hover:bg-emerald-hover text-butter font-bold rounded-xl text-xs shadow transition active:scale-[0.98] flex items-center justify-center gap-1.5">
+            <span>🚀</span>
+            <span>Сдать кассу & Z-отчёт</span>
           </button>
         </div>
       </div>
@@ -4033,36 +4155,20 @@
         <label class="font-bold text-xs text-charcoal-muted uppercase tracking-wider block">Выберите навигатор для поездки:</label>
 
         <!-- 1. YANDEX MAPS / NAVIGATOR -->
-        <a id="nav-modal-yandex-btn" href="#" target="_blank" class="w-full min-h-[52px] p-3 rounded-2xl bg-[#FC3F1D]/10 hover:bg-[#FC3F1D]/20 border-2 border-[#FC3F1D]/30 flex items-center justify-between transition group shadow-xs">
+        <a id="nav-modal-yandex-btn" href="#" target="_blank" class="w-full min-h-[56px] p-3.5 rounded-2xl bg-[#FC3F1D]/10 hover:bg-[#FC3F1D]/20 border-2 border-[#FC3F1D]/40 flex items-center justify-between transition group shadow-xs">
           <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-[#FC3F1D] text-white flex items-center justify-center font-black text-sm shadow-sm group-hover:scale-105 transition">
+            <div class="w-11 h-11 rounded-xl bg-[#FC3F1D] text-white flex items-center justify-center font-black text-base shadow-sm group-hover:scale-105 transition">
               Я
             </div>
             <div class="text-left">
               <div class="font-bold text-sm text-[#8A1A05] flex items-center gap-1.5">
-                <span>Яндекс.Карты & Навигатор</span>
-                <span class="text-[10px] bg-[#FC3F1D] text-white px-1.5 py-0.2 rounded font-bold">Самарканд</span>
+                <span>Яндекс Навигатор & Карты</span>
+                <span class="text-[10px] bg-[#FC3F1D] text-white px-2 py-0.5 rounded font-bold">Самарканд</span>
               </div>
-              <div class="text-[11px] text-charcoal-muted font-medium">Маршрут на авто от текущего места ➔ к дому</div>
+              <div class="text-[11px] text-charcoal-muted font-medium mt-0.5">Прямой маршрут на авто от вашего места к клиенту</div>
             </div>
           </div>
-          <i data-lucide="chevron-right" class="w-5 h-5 text-[#8A1A05] group-hover:translate-x-0.5 transition"></i>
-        </a>
-
-        <!-- 2. GOOGLE MAPS -->
-        <a id="nav-modal-google-btn" href="#" target="_blank" class="w-full min-h-[52px] p-3 rounded-2xl bg-[#1A73E8]/10 hover:bg-[#1A73E8]/20 border-2 border-[#1A73E8]/30 flex items-center justify-between transition group shadow-xs">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-[#1A73E8] text-white flex items-center justify-center font-black text-sm shadow-sm group-hover:scale-105 transition">
-              <i data-lucide="map" class="w-5 h-5"></i>
-            </div>
-            <div class="text-left">
-              <div class="font-bold text-sm text-[#0D47A1] flex items-center gap-1.5">
-                <span>Google Maps (Карты)</span>
-              </div>
-              <div class="text-[11px] text-charcoal-muted font-medium">Маршрут на авто от текущего места ➔ к дому</div>
-            </div>
-          </div>
-          <i data-lucide="chevron-right" class="w-5 h-5 text-[#0D47A1] group-hover:translate-x-0.5 transition"></i>
+          <i data-lucide="chevron-right" class="w-5 h-5 text-[#8A1A05] group-hover:translate-x-1 transition"></i>
         </a>
       </div>
 
@@ -4099,6 +4205,109 @@
       <!-- Dynamic notification cards populated via JS -->
     </div>
   </aside>
+
+  <!-- 7.6.5. MODAL: COURIER ORDER DETAILED INFO & ITEMS BREAKDOWN -->
+  <div id="modal-courier-order-info" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-3 sm:p-4">
+    <div class="theme-card bg-white border-2 border-[#0E4352]/40 rounded-3xl p-5 sm:p-6 max-w-xl w-full shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto custom-scrollbar">
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between border-b border-[#0E4352]/30 pb-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="w-11 h-11 rounded-2xl bg-cyan-600 text-white flex items-center justify-center font-bold text-xl shadow shrink-0">
+            <span>ℹ️</span>
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span id="courier-info-order-id" class="font-mono font-bold text-xs px-2.5 py-0.5 rounded-lg bg-[#04222B] text-[#00E5FF]">#CSM-0000</span>
+              <span id="courier-info-stage-badge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Статус</span>
+            </div>
+            <h3 class="font-serif text-lg font-bold text-white truncate mt-0.5" id="courier-info-client-name">Имя Клиента</h3>
+          </div>
+        </div>
+        <button type="button" onclick="closeCourierOrderInfoModal()" class="w-8 h-8 rounded-full bg-black/20 hover:bg-black/40 flex items-center justify-center text-[#67B0C5] hover:text-white transition text-lg font-bold">
+          ✕
+        </button>
+      </div>
+
+      <!-- Client & Address Card -->
+      <div class="p-3.5 rounded-2xl bg-[#03141D] border border-[#0E4352] space-y-2 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-[#67B0C5]">Телефон:</span>
+            <span id="courier-info-phone" class="font-mono font-bold text-[#00E5FF] text-sm">+998 ...</span>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button type="button" id="courier-info-call-btn" class="px-2.5 py-1 bg-[#1D8B94] text-white rounded-lg text-xs font-bold hover:bg-[#4FB8B4] transition shadow-2xs flex items-center gap-1">
+              <span>📞 Позвонить</span>
+            </button>
+            <button type="button" id="courier-info-tg-btn" class="px-2.5 py-1 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition shadow-2xs flex items-center gap-1">
+              <span>💬 Написать</span>
+            </button>
+          </div>
+        </div>
+        <div class="text-[#67B0C5]">
+          <span class="font-bold">Адрес:</span> <span id="courier-info-address" class="text-white font-semibold">...</span>
+        </div>
+        <div id="courier-info-landmark-box" class="hidden text-[#67B0C5]">
+          <span class="font-bold">Ориентир:</span> <span id="courier-info-landmark" class="text-amber-400 font-semibold">...</span>
+        </div>
+        <div id="courier-info-notes-box" class="hidden p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 font-medium">
+          <span class="font-bold">💬 Примечание:</span> <span id="courier-info-notes">...</span>
+        </div>
+      </div>
+
+      <!-- Carpets & Services Detailed Table -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between text-xs font-bold text-[#67B0C5] uppercase tracking-wider">
+          <span>Состав заказа & Размеры изделий</span>
+          <span id="courier-info-total-m2" class="text-[#00E5FF] font-mono">0 м²</span>
+        </div>
+        <div class="border border-[#0E4352] rounded-2xl overflow-hidden shadow-2xs">
+          <table class="w-full text-xs text-left">
+            <thead class="bg-[#03141D] font-bold border-b border-[#0E4352] text-[#00E5FF]">
+              <tr>
+                <th class="p-2 sm:p-2.5">№ Изделие</th>
+                <th class="p-2 sm:p-2.5 text-center">Размер (м)</th>
+                <th class="p-2 sm:p-2.5 text-center">м² / шт</th>
+                <th class="p-2 sm:p-2.5 text-right">Сумма</th>
+              </tr>
+            </thead>
+            <tbody id="courier-info-items-tbody" class="divide-y divide-[#0E4352]/40 bg-[#072632]">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Financial Total Box -->
+      <div class="p-3.5 rounded-2xl bg-[#03141D] border border-[#0E4352] space-y-1.5 text-xs font-medium">
+        <div class="flex justify-between text-[#67B0C5]">
+          <span>Итого по прейскуранту:</span>
+          <span id="courier-info-total-price" class="font-mono font-bold text-white text-sm">0 сум</span>
+        </div>
+        <div class="flex justify-between text-[#67B0C5]">
+          <span>Внесенный аванс / Оплачено:</span>
+          <span id="courier-info-paid-amount" class="font-mono font-bold text-[#10B981]">0 сум</span>
+        </div>
+        <div class="flex justify-between text-sm font-black pt-1.5 border-t border-[#0E4352]">
+          <span class="text-[#00E5FF]">К ОПЛАТЕ ПРИ ВРУЧЕНИИ:</span>
+          <span id="courier-info-remaining-price" class="font-mono font-black text-rose-400 text-base">0 сум</span>
+        </div>
+      </div>
+
+      <!-- Modal Bottom Actions -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+        <button type="button" id="courier-info-navi-btn" class="py-2.5 px-3 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow transition truncate">
+          <span>🧭 Навигатор</span>
+        </button>
+        <button type="button" id="courier-info-print-btn" class="py-2.5 px-3 bg-[#00E5FF] text-[#03141D] hover:bg-[#4FB8B4] active:scale-95 font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow transition truncate">
+          <span>🧾 Печать чека</span>
+        </button>
+        <button type="button" onclick="closeCourierOrderInfoModal()" class="col-span-2 sm:col-span-1 py-2.5 px-3 bg-[#0A3542] hover:bg-[#072632] text-white font-bold rounded-xl text-xs flex items-center justify-center transition border border-[#0E4352]">
+          Закрыть
+        </button>
+      </div>
+    </div>
+  </div>
 
   <!-- 7.7. MODAL: ORDER PHOTOS & DEFECT CAPTURE -->
   <div id="modal-order-photos" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-3 sm:p-4">

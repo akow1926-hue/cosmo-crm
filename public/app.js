@@ -325,27 +325,34 @@ window.showToast = showToast;
 
 // Theme & Eye Comfort Management
 function toggleTheme() {
-  const current = localStorage.getItem('barokot_theme') || 'ivory';
+  const current = localStorage.getItem('cosmo_theme') || localStorage.getItem('barokot_theme') || 'dark';
   const next = current === 'dark' ? 'ivory' : 'dark';
   setTheme(next);
 }
 
 function setTheme(themeName) {
   const body = document.body;
+  const doc = document.documentElement;
   const isDark = themeName === 'dark';
 
   if (isDark) {
+    themeName = 'dark';
     body.setAttribute('data-theme', 'dark');
-    document.documentElement.classList.add('dark');
+    doc.setAttribute('data-theme', 'dark');
+    doc.classList.add('dark');
   } else if (themeName === 'pure') {
+    themeName = 'pure';
     body.setAttribute('data-theme', 'pure');
-    document.documentElement.classList.remove('dark');
+    doc.setAttribute('data-theme', 'pure');
+    doc.classList.remove('dark');
   } else {
-    // Default: 'ivory' (Warm soothing ivory linen)
-    body.removeAttribute('data-theme');
-    document.documentElement.classList.remove('dark');
+    // Default: 'ivory'
     themeName = 'ivory';
+    body.setAttribute('data-theme', 'ivory');
+    doc.setAttribute('data-theme', 'ivory');
+    doc.classList.remove('dark');
   }
+  localStorage.setItem('cosmo_theme', themeName);
   localStorage.setItem('barokot_theme', themeName);
 
   // Update 3-way switcher in top bar
@@ -382,13 +389,27 @@ function setTheme(themeName) {
     if (isDark) {
       quickIcon.textContent = '☀️';
       quickLabel.textContent = 'Светлая';
-      if (quickBtn) quickBtn.title = 'Переключить на мягкий дневной режим (Айвори)';
+      if (quickBtn) quickBtn.title = 'Переключить на дневной режим';
     } else {
       quickIcon.textContent = '🌙';
       quickLabel.textContent = 'Тёмная';
-      if (quickBtn) quickBtn.title = 'Переключить на ночной изумрудный режим';
+      if (quickBtn) quickBtn.title = 'Переключить на ночной режим';
     }
   }
+
+  // Update all portal quick theme icons (Dispatcher, Courier, Washer)
+  document.querySelectorAll('.portal-theme-icon').forEach(el => {
+    el.textContent = isDark ? '☀️' : '🌙';
+  });
+
+  // Invalidate and refresh any active Leaflet maps smoothly
+  setTimeout(() => {
+    try {
+      if (typeof leafletMap !== 'undefined' && leafletMap && leafletMap.invalidateSize) leafletMap.invalidateSize();
+      if (typeof courierPortalMap !== 'undefined' && courierPortalMap && courierPortalMap.invalidateSize) courierPortalMap.invalidateSize();
+      if (typeof locationPickerMap !== 'undefined' && locationPickerMap && locationPickerMap.invalidateSize) locationPickerMap.invalidateSize();
+    } catch (e) {}
+  }, 100);
 
   // Update PIN dots glow color if on login screen
   updatePinDots();
@@ -397,7 +418,7 @@ function setTheme(themeName) {
 // Initial Entry Point
 document.addEventListener('DOMContentLoaded', async () => {
   // Apply saved eye-comfort theme (default to Cyber Space Teal dark theme)
-  const savedTheme = localStorage.getItem('barokot_theme') || 'dark';
+  const savedTheme = localStorage.getItem('cosmo_theme') || localStorage.getItem('barokot_theme') || 'dark';
   setTheme(savedTheme);
 
   // Initialize live header clock & date ticker
@@ -621,22 +642,82 @@ async function loadInitialData() {
 
 // ================= LIVE ORDER BACKGROUND SYNC & POLLING =================
 
+// Глобальная карта недавних локальных изменений (45-секундный grace-период)
+// Предотвращает откат карточек назад при фоновом опросе multi-lambda Vercel или задержках Google Sheets
+const recentLocalOrderMutations = new Map(); // orderId -> { patch, timestamp }
+const pendingLocalOrders = new Map(); // orderId -> { order, timestamp }
+
+function recordOrderMutation(orderId, patch) {
+  if (!orderId) return;
+  const existing = recentLocalOrderMutations.get(String(orderId))?.patch || {};
+  recentLocalOrderMutations.set(String(orderId), {
+    patch: { ...existing, ...patch },
+    timestamp: Date.now()
+  });
+}
+
+function recordNewLocalOrder(order) {
+  if (!order || !order.id) return;
+  pendingLocalOrders.set(String(order.id), {
+    order: { ...order },
+    timestamp: Date.now()
+  });
+}
+
 let liveSyncInterval = null;
 
 async function silentSyncOrders() {
   if (!currentUser) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
   try {
     const res = await fetch('/api/orders');
     if (!res.ok) return;
     const freshOrders = await res.json();
     if (!Array.isArray(freshOrders)) return;
 
+    const now = Date.now();
+    // Очистка устаревших мутаций (> 45 секунд)
+    for (const [mId, mData] of recentLocalOrderMutations.entries()) {
+      if (now - mData.timestamp > 45000) {
+        recentLocalOrderMutations.delete(mId);
+      }
+    }
+    // Очистка локальных добавленных заказов (> 60 секунд)
+    for (const [pId, pData] of pendingLocalOrders.entries()) {
+      if (now - pData.timestamp > 60000) {
+        pendingLocalOrders.delete(pId);
+      }
+    }
+
+    // Применяем активные локальные мутации, чтобы избежать эффекта "прыжка назад"
+    let mergedOrders = freshOrders.map(fo => {
+      const mut = recentLocalOrderMutations.get(String(fo.id));
+      if (mut && (now - mut.timestamp <= 45000)) {
+        return { ...fo, ...mut.patch };
+      }
+      return fo;
+    });
+
+    // Сохраняем локально созданные заказы, которые сервер еще не успел вернуть из-за задержки
+    for (const [pId, pData] of pendingLocalOrders.entries()) {
+      const existsOnServer = mergedOrders.some(o => String(o.id) === String(pId));
+      if (!existsOnServer && (now - pData.timestamp <= 60000)) {
+        mergedOrders.unshift(pData.order);
+      }
+    }
+
+    // Если сервер неожиданно вернул пустой массив, но у нас уже были заказы — не затираем!
+    if (mergedOrders.length === 0 && activeOrders.length > 0) {
+      return;
+    }
+
     // Check if anything changed in active orders
-    const currentFingerprint = activeOrders.map(o => `${o.id}_${o.stage}_${o.courier_name}_${o.paid}_${o.total_price}`).join('|');
-    const freshFingerprint = freshOrders.map(o => `${o.id}_${o.stage}_${o.courier_name}_${o.paid}_${o.total_price}`).join('|');
+    const getOrderFingerprint = o => `${o.id}_${o.stage}_${o.courier_name}_${o.paid}_${o.paid_amount}_${o.total_price}_${o.client_address}_${o.notes}_${(o.photos || []).length}_${o.total_m2}`;
+    const currentFingerprint = activeOrders.map(getOrderFingerprint).join('|');
+    const freshFingerprint = mergedOrders.map(getOrderFingerprint).join('|');
 
     if (currentFingerprint !== freshFingerprint) {
-      activeOrders = freshOrders;
+      activeOrders = mergedOrders;
       // Do not interrupt user if any modal is currently open
       const anyModalOpen = document.querySelector('[id^="modal-"]:not(.hidden)');
       if (!anyModalOpen) {
@@ -663,7 +744,7 @@ async function silentSyncOrders() {
 
 function startLiveOrderSync() {
   if (liveSyncInterval) clearInterval(liveSyncInterval);
-  liveSyncInterval = setInterval(silentSyncOrders, 6000);
+  liveSyncInterval = setInterval(silentSyncOrders, 4000);
 }
 
 async function manualRefreshData() {
@@ -1105,21 +1186,21 @@ function renderDashboard() {
     urgentList.innerHTML = '<div class="text-xs text-charcoal-muted italic py-4 text-center">Нет срочных или требующих внимания заказов</div>';
   } else {
     urgentList.innerHTML = urgentOrders.map(o => `
-      <div class="flex items-center justify-between p-3 rounded-xl bg-[#03141D] border border-[#0E4352] hover:border-[#00E5FF]/50 transition shadow-sm cursor-pointer" onclick="openEditOrderModal('${o.id}')">
+      <div class="flex items-center justify-between p-3 rounded-xl bg-black/5 hover:bg-black/10 border border-emerald-deep/15 hover:border-emerald-deep transition shadow-xs cursor-pointer" onclick="openEditOrderModal('${o.id}')">
         <div class="flex items-center space-x-3">
-          <div class="w-9 h-9 rounded-xl ${o.urgent ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-[#00E5FF]/10 text-[#00E5FF] border border-[#00E5FF]/20'} flex items-center justify-center font-bold text-xs shrink-0">
+          <div class="w-9 h-9 rounded-xl ${o.urgent ? 'bg-rose-100 text-rose-700 border border-rose-300' : 'bg-emerald-deep/10 text-emerald-deep border border-emerald-deep/20'} flex items-center justify-center font-bold text-xs shrink-0">
             ${o.urgent ? '⚡' : '🏷️'}
           </div>
           <div>
             <div class="flex items-center gap-2">
-              <span class="font-mono font-bold text-xs text-white">#${escapeHtml(o.id)}</span>
-              <span class="text-xs font-semibold text-[#67B0C5]">${escapeHtml(o.client_name)}</span>
+              <span class="font-mono font-bold text-xs text-emerald-deep">#${escapeHtml(o.id)}</span>
+              <span class="text-xs font-semibold text-charcoal">${escapeHtml(o.client_name)}</span>
               ${o.urgent ? '<span class="text-[10px] bg-rose-600 text-white px-1.5 py-0.2 rounded font-bold">СРОЧНО</span>' : ''}
             </div>
-            <div class="text-[11px] text-[#67B0C5]/80 flex items-center gap-2 mt-0.5">
+            <div class="text-[11px] text-charcoal-muted flex items-center gap-2 mt-0.5">
               <span>📍 ${escapeHtml(o.district || 'Сиёб')}, ${escapeHtml(o.client_address)}</span>
               <span>•</span>
-              <span class="font-mono font-bold text-white">${(o.total_price || 0).toLocaleString()} сум</span>
+              <span class="font-mono font-bold text-emerald-deep">${(o.total_price || 0).toLocaleString()} сум</span>
             </div>
           </div>
         </div>
@@ -1134,18 +1215,20 @@ function renderDashboard() {
   const auditList = document.getElementById('dashboard-audit-list');
   const recentOrders = activeOrders.slice(0, 6);
   if (!recentOrders || recentOrders.length === 0) {
-    auditList.innerHTML = '<div class="text-xs text-[#67B0C5] italic py-2 text-center">Журнал операций пуст</div>';
+    auditList.innerHTML = '<div class="text-xs text-charcoal-muted italic py-2 text-center">Журнал операций пуст</div>';
   } else {
     auditList.innerHTML = recentOrders.map(o => `
-      <div class="flex items-start gap-2.5 border-b border-[#0E4352]/40 pb-2.5">
-        <div class="w-2 h-2 rounded-full bg-[#00E5FF] mt-1.5 shrink-0 shadow-[0_0_8px_rgba(0,229,255,0.8)]"></div>
+      <div class="flex items-start gap-2.5 border-b border-emerald-deep/10 pb-2.5">
+        <div class="w-2 h-2 rounded-full bg-emerald-deep mt-1.5 shrink-0"></div>
         <div>
-          <div class="font-semibold text-white text-xs">Заказ #${escapeHtml(o.id)} — ${getStageText(o.stage)}</div>
-          <div class="text-[10px] text-[#67B0C5]">${escapeHtml(o.client_name)} • ${o.pickup_date || o.created_at || 'Сегодня'}</div>
+          <div class="font-semibold text-emerald-deep text-xs">Заказ #${escapeHtml(o.id)} — ${getStageText(o.stage)}</div>
+          <div class="text-[10px] text-charcoal-muted">${escapeHtml(o.client_name)} • ${o.pickup_date || o.created_at || 'Сегодня'}</div>
         </div>
       </div>
     `).join('');
   }
+
+  if (window.lucide) lucide.createIcons();
 }
 
 // ================= VIEW 2: ORDERS TABLE =================
@@ -2073,6 +2156,310 @@ function printCourierZReport(customData) {
     window.print();
     printContainer.classList.add('hidden');
   }, 150);
+}
+
+// ================= MODAL COURIER SHIFT HANDOVER & TELEGRAM Z-REPORT =================
+let currentModalShiftData = null;
+
+async function openCourierShiftModal(preferredCourier, preferredDate) {
+  const modal = document.getElementById('modal-courier-shift');
+  if (!modal) return;
+
+  const courierDisplay = document.getElementById('modal-shift-courier-display');
+  const courierSelect = document.getElementById('modal-shift-courier-select');
+  const dateInput = document.getElementById('modal-shift-date-input');
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  if (dateInput) {
+    dateInput.value = preferredDate || todayIso;
+  }
+
+  // Определяем активного курьера
+  const isCourierUser = currentUser && (currentUser.role === 'courier' || currentUser.role === 'driver');
+  const loggedCourierName = cleanCourierName(currentUser?.name || '');
+
+  // Собираем список всех возможных курьеров для выбора
+  const couriersSet = new Set();
+  if (Array.isArray(window.staffList)) {
+    window.staffList.filter(s => s.role === 'courier' || s.role === 'driver').forEach(s => couriersSet.add(s.name));
+  }
+  if (Array.isArray(window.activeOrders)) {
+    window.activeOrders.forEach(o => {
+      const c = cleanCourierName(o.courier_name);
+      if (c) couriersSet.add(c);
+    });
+  }
+  if (loggedCourierName) couriersSet.add(loggedCourierName);
+
+  const couriersList = Array.from(couriersSet);
+
+  if (courierSelect) {
+    courierSelect.innerHTML = couriersList.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+  }
+
+  if (isCourierUser && loggedCourierName) {
+    if (courierDisplay) {
+      courierDisplay.textContent = `🚚 ${loggedCourierName}`;
+      courierDisplay.classList.remove('hidden');
+    }
+    if (courierSelect) {
+      courierSelect.value = loggedCourierName;
+      courierSelect.classList.add('hidden');
+    }
+  } else {
+    // Админ или диспетчер — может выбрать любого курьера
+    if (courierSelect) {
+      if (preferredCourier && couriersList.includes(preferredCourier)) {
+        courierSelect.value = preferredCourier;
+      }
+      courierSelect.classList.remove('hidden');
+    }
+    if (courierDisplay) {
+      courierDisplay.classList.add('hidden');
+    }
+  }
+
+  // Сброс полей ввода расходов и примечания
+  const expAmount = document.getElementById('modal-shift-expense-amount');
+  const expDesc = document.getElementById('modal-shift-expense-desc');
+  const notesInput = document.getElementById('modal-shift-notes-input');
+  if (expAmount) expAmount.value = '';
+  if (expDesc) expDesc.value = '';
+  if (notesInput) notesInput.value = '';
+
+  openModal('modal-courier-shift');
+  await reloadModalShiftData();
+}
+
+async function reloadModalShiftData() {
+  const courierSelect = document.getElementById('modal-shift-courier-select');
+  const isCourierUser = currentUser && (currentUser.role === 'courier' || currentUser.role === 'driver');
+  const courier = isCourierUser
+    ? cleanCourierName(currentUser?.name || '')
+    : (courierSelect ? courierSelect.value : cleanCourierName(currentUser?.name || ''));
+
+  const dateInput = document.getElementById('modal-shift-date-input');
+  const date = dateInput && dateInput.value ? dateInput.value : new Date().toISOString().slice(0, 10);
+  const body = document.getElementById('modal-shift-body');
+  if (!body) return;
+
+  if (!courier) {
+    body.innerHTML = '<div class="p-4 text-xs text-center text-charcoal-muted">Выберите курьера для расчета смены</div>';
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="py-6 text-center text-charcoal-muted">
+      <div class="inline-block animate-spin w-6 h-6 border-2 border-emerald-deep border-t-transparent rounded-full mb-2"></div>
+      <p class="text-xs font-bold">Рассчитываем баланс смены для ${escapeHtml(courier)}...</p>
+    </div>
+  `;
+
+  try {
+    const res = await fetch(`/api/finance/courier-shift?courier_name=${encodeURIComponent(courier)}&date=${encodeURIComponent(date)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Ошибка расчета смены');
+    }
+
+    const data = await res.json();
+    currentModalShiftData = data;
+
+    const nonCash = (data.click_collected || 0) + (data.payme_collected || 0) + (data.card_collected || 0);
+
+    // Подставляем ранее зафиксированные расходы курьера, если поле еще пустое
+    const expAmountEl = document.getElementById('modal-shift-expense-amount');
+    const expDescEl = document.getElementById('modal-shift-expense-desc');
+    if (data.expenses_total > 0 && expAmountEl && !expAmountEl.value) {
+      expAmountEl.value = data.expenses_total;
+      if (expDescEl && data.expenses_list && data.expenses_list[0]) {
+        expDescEl.value = data.expenses_list[0].note || '';
+      }
+    }
+
+    let debtsHtml = '';
+    if (data.debts_list && data.debts_list.length > 0) {
+      debtsHtml = `
+        <div class="bg-rose-50 border border-rose-200 rounded-xl p-3 space-y-2">
+          <div class="font-bold text-xs text-rose-800 flex items-center justify-between">
+            <span class="flex items-center gap-1.5">
+              <span>⚠️</span>
+              <span>Долги клиентов за смену (${data.debts_list.length} шт):</span>
+            </span>
+            <span class="font-mono text-rose-900 font-extrabold">${(data.debts_total || 0).toLocaleString()} сум</span>
+          </div>
+          <div class="space-y-1 max-h-36 overflow-y-auto custom-scrollbar text-xs">
+            ${data.debts_list.map(d => `
+              <div class="flex items-center justify-between bg-white p-2 rounded-lg border border-rose-200 text-[11px]">
+                <div>
+                  <b class="text-rose-950">${escapeHtml(d.client_name)}</b>
+                  <span class="text-charcoal-muted ml-1 font-mono text-[10px]">#${escapeHtml(d.order_id)}</span>
+                  <div class="text-[10px] text-charcoal-muted">${escapeHtml(d.client_phone)} • ${escapeHtml(d.reason || 'Не указана')}</div>
+                </div>
+                <div class="font-mono font-bold text-rose-700">
+                  ${(Number(d.debt_amount) || 0).toLocaleString()} сум
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    let acceptedBanner = '';
+    if (data.is_accepted) {
+      const rec = data.shift_record || {};
+      acceptedBanner = `
+        <div class="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 text-xs text-emerald-900 flex items-center gap-2">
+          <span class="text-base">✅</span>
+          <div>
+            <b>Смена за ${data.shift_date_ru || data.shift_date} уже была сдана!</b>
+            <div class="text-[11px] text-emerald-800">Принял: ${escapeHtml(rec.accepted_by || 'Администратор')} • При повторной отправке данные обновятся и Z-отчет будет отправлен заново.</div>
+          </div>
+        </div>
+      `;
+    }
+
+    body.innerHTML = `
+      ${acceptedBanner}
+      <!-- KPI Grid -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div class="bg-emerald-deep/5 border border-emerald-deep/15 rounded-xl p-2.5 text-center">
+          <div class="text-[10px] uppercase font-bold text-charcoal-muted">Доставлено</div>
+          <div class="text-base font-bold font-mono text-emerald-deep mt-0.5">${data.orders_count || 0} шт</div>
+        </div>
+        <div class="bg-emerald-deep/5 border border-emerald-deep/15 rounded-xl p-2.5 text-center">
+          <div class="text-[10px] uppercase font-bold text-charcoal-muted">Выручка</div>
+          <div class="text-xs sm:text-sm font-bold font-mono text-emerald-deep mt-0.5">${(data.total_delivered_sum || 0).toLocaleString()} сум</div>
+        </div>
+        <div class="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 text-center">
+          <div class="text-[10px] uppercase font-bold text-emerald-800">💵 Наличные</div>
+          <div class="text-xs sm:text-sm font-bold font-mono text-emerald-800 mt-0.5">${(data.cash_collected || 0).toLocaleString()} сум</div>
+        </div>
+        <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-2.5 text-center">
+          <div class="text-[10px] uppercase font-bold text-blue-800">💳 Безнал</div>
+          <div class="text-xs sm:text-sm font-bold font-mono text-blue-800 mt-0.5">${nonCash.toLocaleString()} сум</div>
+        </div>
+      </div>
+      ${debtsHtml}
+    `;
+
+    recalcModalShiftNetCash();
+  } catch (err) {
+    body.innerHTML = `
+      <div class="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs">
+        <b>Ошибка загрузки смены:</b> ${escapeHtml(err.message)}
+      </div>
+    `;
+  }
+}
+
+function recalcModalShiftNetCash() {
+  const cash = currentModalShiftData ? (Number(currentModalShiftData.cash_collected) || 0) : 0;
+  const expAmountEl = document.getElementById('modal-shift-expense-amount');
+  const exp = expAmountEl ? (Number(expAmountEl.value) || 0) : 0;
+  const netCash = Math.max(0, cash - exp);
+
+  const displayEl = document.getElementById('modal-shift-net-cash-display');
+  const formulaEl = document.getElementById('modal-shift-formula-display');
+
+  if (displayEl) displayEl.textContent = netCash.toLocaleString('ru-RU');
+  if (formulaEl) {
+    formulaEl.textContent = `Формула: Собрано налом (${cash.toLocaleString('ru-RU')} сум) - Расходы (${exp.toLocaleString('ru-RU')} сум) = ${netCash.toLocaleString('ru-RU')} сум`;
+  }
+}
+
+async function submitCourierShiftFromModal() {
+  if (!currentModalShiftData) {
+    alert('Сначала дождитесь загрузки данных смены');
+    return;
+  }
+
+  const courierSelect = document.getElementById('modal-shift-courier-select');
+  const isCourierUser = currentUser && (currentUser.role === 'courier' || currentUser.role === 'driver');
+  const courier = isCourierUser
+    ? cleanCourierName(currentUser?.name || '')
+    : (courierSelect ? courierSelect.value : cleanCourierName(currentUser?.name || ''));
+
+  const dateInput = document.getElementById('modal-shift-date-input');
+  const date = dateInput && dateInput.value ? dateInput.value : new Date().toISOString().slice(0, 10);
+
+  const expAmountEl = document.getElementById('modal-shift-expense-amount');
+  const expDescEl = document.getElementById('modal-shift-expense-desc');
+  const notesInput = document.getElementById('modal-shift-notes-input');
+
+  const exp = expAmountEl ? (Number(expAmountEl.value) || 0) : 0;
+  const expDesc = expDescEl ? expDescEl.value.trim() : '';
+  const notes = notesInput ? notesInput.value.trim() : '';
+
+  const cash = Number(currentModalShiftData.cash_collected) || 0;
+  const netCash = Math.max(0, cash - exp);
+
+  const confirmMsg = `Подтвердите закрытие смены и сдачу кассы курьера ${courier} за ${date}:\n\n` +
+    `• Доставлено заказов: ${currentModalShiftData.orders_count || 0} шт\n` +
+    `• Собрано наличными: ${cash.toLocaleString('ru-RU')} сум\n` +
+    `• Расходы на бензин/авто: -${exp.toLocaleString('ru-RU')} сум\n` +
+    `• К СДАЧЕ В КАССУ: ${netCash.toLocaleString('ru-RU')} сум\n\n` +
+    `Отправить Z-отчёт в Telegram и зафиксировать в CRM?`;
+
+  if (!confirm(confirmMsg)) return;
+
+  const submitBtn = document.getElementById('btn-submit-courier-shift');
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `<span>⏳</span> <span>Отправка Z-отчета...</span>`;
+  }
+
+  try {
+    const res = await fetch('/api/courier/submit-shift', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        courier_name: courier,
+        date: date,
+        net_cash: netCash,
+        actor_name: currentUser?.name || courier,
+        notes: notes,
+        orders_count: currentModalShiftData.orders_count || 0,
+        cash_collected: currentModalShiftData.cash_collected || 0,
+        click_collected: currentModalShiftData.click_collected || 0,
+        payme_collected: currentModalShiftData.payme_collected || 0,
+        card_collected: currentModalShiftData.card_collected || 0,
+        debts_total: currentModalShiftData.debts_total || 0,
+        debts_list: currentModalShiftData.debts_list || [],
+        expenses_total: exp,
+        expense_note: expDesc
+      })
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Ошибка при фиксации сдачи кассы');
+    }
+
+    alert(`✅ Касса курьера ${courier} успешно сдана!\n\nВ кассу поступило: ${netCash.toLocaleString('ru-RU')} сум.\nВечерний Z-отчет отправлен руководителю в Telegram!`);
+    closeModal('modal-courier-shift');
+
+    // Обновляем состояние портала
+    if (typeof renderCourierPortal === 'function') renderCourierPortal();
+    if (typeof loadCourierShiftsHistory === 'function') loadCourierShiftsHistory();
+    if (typeof renderFinance === 'function') renderFinance();
+  } catch (err) {
+    alert('Ошибка при сдаче кассы: ' + err.message);
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = `<span>🚀</span> <span>Сдать кассу & Z-отчёт</span>`;
+    }
+  }
+}
+
+function printModalZReport() {
+  if (!currentModalShiftData) {
+    alert('Нет данных для печати Z-отчета');
+    return;
+  }
+  printCourierZReport(currentModalShiftData);
 }
 
 async function loadCourierShiftsHistory() {
@@ -3612,6 +3999,162 @@ function copyNavModalCoords() {
   });
 }
 
+// ================= COURIER ORDER DETAILED INFO MODAL =================
+function openCourierOrderInfoModal(orderId) {
+  const order = (activeOrders || []).find(o => String(o.id) === String(orderId));
+  if (!order) {
+    alert(`Заказ #${orderId} не найден`);
+    return;
+  }
+
+  const modal = document.getElementById('modal-courier-order-info');
+  if (!modal) return;
+
+  // Header
+  const idEl = document.getElementById('courier-info-order-id');
+  if (idEl) idEl.textContent = `#${order.id}`;
+
+  const stageBadge = document.getElementById('courier-info-stage-badge');
+  if (stageBadge) {
+    stageBadge.textContent = getStageLabelRu(order.stage);
+    stageBadge.className = `text-[10px] font-bold px-2 py-0.5 rounded-full ${
+      order.stage === 'pickup' ? 'bg-amber-100 text-amber-800' :
+      order.stage === 'delivered' ? 'bg-emerald-100 text-emerald-800' :
+      'bg-blue-100 text-blue-800'
+    }`;
+  }
+
+  const nameEl = document.getElementById('courier-info-client-name');
+  if (nameEl) nameEl.textContent = order.client_name || 'Клиент';
+
+  // Client info
+  const phoneEl = document.getElementById('courier-info-phone');
+  if (phoneEl) phoneEl.textContent = order.client_phone || '+998 ...';
+
+  const callBtn = document.getElementById('courier-info-call-btn');
+  if (callBtn) callBtn.onclick = () => callClient(order.id, order.client_phone, order.client_name);
+
+  const tgBtn = document.getElementById('courier-info-tg-btn');
+  if (tgBtn) tgBtn.onclick = () => contactClientTelegram(order.id);
+
+  const addrEl = document.getElementById('courier-info-address');
+  if (addrEl) addrEl.textContent = `${order.client_address || 'Самарканд'} (${order.district || 'Сиёб'})`;
+
+  const landmarkBox = document.getElementById('courier-info-landmark-box');
+  const landmarkEl = document.getElementById('courier-info-landmark');
+  if (landmarkBox && landmarkEl) {
+    if (order.landmark && order.landmark.trim()) {
+      landmarkEl.textContent = order.landmark.trim();
+      landmarkBox.classList.remove('hidden');
+    } else {
+      landmarkBox.classList.add('hidden');
+    }
+  }
+
+  const notesBox = document.getElementById('courier-info-notes-box');
+  const notesEl = document.getElementById('courier-info-notes');
+  if (notesBox && notesEl) {
+    if (order.notes && order.notes.trim()) {
+      notesEl.textContent = order.notes.trim();
+      notesBox.classList.remove('hidden');
+    } else {
+      notesBox.classList.add('hidden');
+    }
+  }
+
+  // Items / Carpets Table
+  const tbody = document.getElementById('courier-info-items-tbody');
+  const totalM2El = document.getElementById('courier-info-total-m2');
+  let carpets = [];
+  try {
+    carpets = order.carpets ? (typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets) : [];
+  } catch (e) {
+    carpets = [];
+  }
+  if (!Array.isArray(carpets) || carpets.length === 0) {
+    carpets = [{ name: 'Ковер', length: null, width: null, area: order.total_m2 || 0, price: 14000, total: order.total_price || 0 }];
+  }
+
+  const calcTotalM2 = carpets.reduce((s, it) => s + (Number(it.area) || ((Number(it.length) || 0) * (Number(it.width) || 0)) || 0), 0);
+  if (totalM2El) totalM2El.textContent = `${calcTotalM2.toFixed(1)} м² (${carpets.length} шт)`;
+
+  if (tbody) {
+    tbody.innerHTML = carpets.map((it, idx) => {
+      const length = it.length ? Number(it.length) : null;
+      const width = it.width ? Number(it.width) : null;
+      const dims = (length && width) ? `${length.toFixed(2)} × ${width.toFixed(2)}` : '—';
+      const area = it.area || (length && width ? +(length * width).toFixed(2) : 0);
+      const sizeDisplay = it.unit === 'м²' || (!it.unit && area > 0) ? `${area} м²` : `${it.qty || 1} шт`;
+      const priceDisplay = (it.total || (it.price * (area || 1)) || 0).toLocaleString();
+      return `
+        <tr class="hover:bg-black/5 transition">
+          <td class="p-2 sm:p-2.5 font-medium">
+            <span class="font-bold text-emerald-deep">#${idx + 1}</span> ${escapeHtml(it.name || 'Ковер')}
+            ${it.defects ? `<div class="text-[10px] text-rose-600 font-semibold mt-0.5">⚠️ ${escapeHtml(it.defects)}</div>` : ''}
+          </td>
+          <td class="p-2 sm:p-2.5 text-center font-mono">${dims}</td>
+          <td class="p-2 sm:p-2.5 text-center font-mono font-bold">${sizeDisplay}</td>
+          <td class="p-2 sm:p-2.5 text-right font-mono font-bold text-emerald-deep">${priceDisplay} сум</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // Financial Summary
+  const totalPrice = order.total_price || 0;
+  const paidAmount = order.paid ? totalPrice : (order.paid_amount || 0);
+  const remaining = Math.max(0, totalPrice - paidAmount);
+
+  const totalEl = document.getElementById('courier-info-total-price');
+  if (totalEl) totalEl.textContent = `${totalPrice.toLocaleString()} сум`;
+
+  const paidEl = document.getElementById('courier-info-paid-amount');
+  if (paidEl) paidEl.textContent = `${paidAmount.toLocaleString()} сум (${order.paid ? 'Оплачено' : 'Частично'})`;
+
+  const remEl = document.getElementById('courier-info-remaining-price');
+  if (remEl) {
+    remEl.textContent = `${remaining.toLocaleString()} сум`;
+    remEl.className = remaining > 0 ? 'font-mono font-black text-rose-700 text-base' : 'font-mono font-black text-emerald-700 text-base';
+  }
+
+  // Action buttons
+  const naviBtn = document.getElementById('courier-info-navi-btn');
+  if (naviBtn) naviBtn.onclick = () => {
+    closeCourierOrderInfoModal();
+    navigateToOrder(order.id, 'yandex');
+  };
+
+  const printBtn = document.getElementById('courier-info-print-btn');
+  if (printBtn) printBtn.onclick = () => printOrderReceipt(order.id);
+
+  modal.classList.remove('hidden');
+}
+
+function closeCourierOrderInfoModal() {
+  const modal = document.getElementById('modal-courier-order-info');
+  if (modal) modal.classList.add('hidden');
+}
+
+function contactClientTelegram(orderId) {
+  const order = (activeOrders || []).find(o => String(o.id) === String(orderId));
+  if (!order) return;
+  const rawPhone = String(order.client_phone || '').replace(/\D/g, '');
+  const cleanPhone = rawPhone.startsWith('998') ? rawPhone : ('998' + rawPhone);
+
+  const isPickup = order.stage === 'pickup';
+  const remaining = Math.max(0, (order.total_price || 0) - (order.paid ? order.total_price : (order.paid_amount || 0)));
+
+  let msg = '';
+  if (isPickup) {
+    msg = `Здравствуйте, ${order.client_name || 'клиент'}! Служба стирки ковров Cosmo. Мы едем к вам забрать ковры (заказ #${order.id}). Будем ориентировочно через 15-20 минут. Пожалуйста, будьте дома!`;
+  } else {
+    msg = `Здравствуйте, ${order.client_name || 'клиент'}! Служба стирки ковров Cosmo. Ваши ковры постираны и упакованы. Везем ваш заказ #${order.id}${remaining > 0 ? `, сумма к оплате: ${remaining.toLocaleString()} сум` : ''}. Будем ориентировочно через 15-20 минут.`;
+  }
+
+  const tgUrl = `https://t.me/+${cleanPhone}?text=${encodeURIComponent(msg)}`;
+  window.open(tgUrl, '_blank');
+}
+
 // Explicit window bindings
 window.openPickupModal = openPickupModal;
 window.capturePickupPhoneGps = capturePickupPhoneGps;
@@ -3626,6 +4169,9 @@ window.openNavigationModal = openNavigationModal;
 window.navigateToOrder = navigateToOrder;
 window.captureCurrentGpsForOrder = captureCurrentGpsForOrder;
 window.copyNavModalCoords = copyNavModalCoords;
+window.openCourierOrderInfoModal = openCourierOrderInfoModal;
+window.closeCourierOrderInfoModal = closeCourierOrderInfoModal;
+window.contactClientTelegram = contactClientTelegram;
 
 // ================= VIEW 9: INTEGRATIONS (SMS, TELEGRAM & TURSO DB) =================
 
@@ -6054,12 +6600,37 @@ function renderCourierPortalCards() {
     else pickupSubTabsEl.classList.add('hidden');
   }
 
+  let doneHeaderHtml = '';
+  if (activeCourierPortalTab === 'done') {
+    let pocketCash = 0;
+    targetList.forEach(o => {
+      if (o.payment_method === 'cash' || (!o.payment_method && o.paid)) {
+        pocketCash += (o.paid_amount || o.total_price || 0);
+      }
+    });
+    doneHeaderHtml = `
+      <div class="col-span-full bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-950 text-butter p-4 rounded-2xl shadow-md flex flex-wrap items-center justify-between gap-3 mb-2">
+        <div>
+          <div class="text-[10px] font-bold uppercase tracking-wider text-butter/80">Итоги вечерней смены курьера</div>
+          <div class="text-xs text-white/95 mt-0.5">
+            Выполнено: <b class="text-butter font-mono">${targetList.length}</b> заказов • Наличные на руках: <b class="text-butter font-mono">${pocketCash.toLocaleString('ru-RU')} сум</b>
+          </div>
+        </div>
+        <button type="button" onclick="openCourierShiftModal()" class="py-2 px-4 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-extrabold rounded-xl text-xs flex items-center gap-2 shadow transition">
+          <span>📊</span>
+          <span>Сдать кассу & Z-отчёт в Telegram</span>
+        </button>
+      </div>
+    `;
+  }
+
   if (targetList.length === 0) {
     const emptyMsg = activeCourierPortalTab === 'pickups' && activeCourierPickupSubTab === 'in_car'
       ? 'Вы ещё не забирали ковры сегодня или все они уже замерены цехом'
-      : 'Все задачи выполнены или ожидают распределения';
+      : (activeCourierPortalTab === 'done' ? 'Сегодня ещё нет доставленных заказов' : 'Все задачи выполнены или ожидают распределения');
     container.innerHTML = `
-      <div class="py-12 text-center text-charcoal-muted theme-card rounded-2xl border border-emerald-deep/15">
+      ${doneHeaderHtml}
+      <div class="col-span-full py-12 text-center text-charcoal-muted theme-card rounded-2xl border border-emerald-deep/15">
         ${getSvgIcon('check-circle-2', 'w-12 h-12 mx-auto text-emerald-deep/40 mb-2')}
         <p class="font-bold text-sm">В этой вкладке нет активных заказов</p>
         <p class="text-xs mt-1">${emptyMsg}</p>
@@ -6069,7 +6640,7 @@ function renderCourierPortalCards() {
     return;
   }
 
-  container.innerHTML = targetList.map(order => {
+  container.innerHTML = doneHeaderHtml + targetList.map(order => {
     const carpets = order.carpets ? (typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets) : [];
     const carpetsCount = carpets.length > 0 ? carpets.length : 1;
     const coordInfo = getOrderCoordinatesWithFallback(order);
@@ -6173,108 +6744,99 @@ function renderCourierPortalCards() {
     }
 
     return `
-      <div class="theme-card border border-emerald-deep/20 rounded-2xl p-4 shadow-sm space-y-3">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <span class="font-mono font-bold text-xs px-2.5 py-1 rounded-xl bg-emerald-deep text-butter shadow-xs cursor-pointer" onclick="openNavigationModal('${order.id}')" title="Маршрут к заказу">#${escapeHtml(order.id)}</span>
-            ${order.urgent ? '<span class="bg-rose-100 text-rose-800 text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse">⚡ Срочно</span>' : ''}
+      <div class="theme-card border border-emerald-deep/20 rounded-2xl p-3 sm:p-4 shadow-sm space-y-2.5">
+        <!-- Top Row: ID, Badges & Stage -->
+        <div class="flex items-center justify-between gap-1.5">
+          <div class="flex items-center gap-1.5 overflow-hidden">
+            <span class="font-mono font-bold text-xs px-2.5 py-1 rounded-xl bg-emerald-deep text-butter shadow-xs cursor-pointer hover:opacity-90 transition shrink-0" onclick="navigateToOrder('${order.id}', 'yandex')" title="Построить маршрут в Яндекс Навигаторе">#${escapeHtml(order.id)}</span>
+            ${order.urgent ? '<span class="bg-rose-100 text-rose-800 text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse shrink-0">⚡ Срочно</span>' : ''}
+            ${hasExactGps ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 border border-emerald-300 shrink-0" title="Зафиксированы точные координаты дома">🎯 GPS</span>' : ''}
           </div>
-          <div>${getStageBadge(order.stage)}</div>
+          <div class="shrink-0">${getStageBadge(order.stage)}</div>
         </div>
 
-        <div class="space-y-1.5">
-          <div class="flex items-center justify-between">
-            <h4 class="font-bold text-base text-emerald-deep cursor-pointer hover:underline" onclick="openNavigationModal('${order.id}')" title="Построить маршрут к клиенту">${escapeHtml(order.client_name)}</h4>
-            <span class="text-xs font-bold text-emerald-deep font-mono">${(order.total_price || 0).toLocaleString()} сум</span>
+        <!-- Order Body: Client & Address -->
+        <div class="space-y-1">
+          <!-- Row 2: Client name + Total price -->
+          <div class="flex items-center justify-between gap-2">
+            <h4 class="font-bold text-sm sm:text-base text-emerald-deep truncate cursor-pointer hover:underline" onclick="navigateToOrder('${order.id}', 'yandex')" title="Открыть маршрут">${escapeHtml(order.client_name)}</h4>
+            <span class="text-xs font-bold text-emerald-deep font-mono shrink-0">${(order.total_price || 0).toLocaleString()} сум</span>
           </div>
-          <div class="text-xs text-charcoal-muted flex items-start gap-1.5 cursor-pointer hover:text-emerald-deep transition" onclick="openNavigationModal('${order.id}')" title="Построить маршрут к клиенту">
-            ${getSvgIcon('map-pin', 'w-4 h-4 text-emerald-deep shrink-0 mt-0.5')}
-            <span>${escapeHtml(order.client_address)} <b class="text-emerald-deep">(${escapeHtml(order.district || 'Самарканд')})</b></span>
-          </div>
-          ${order.landmark ? `<div class="text-[11px] text-charcoal-muted pl-5 font-medium">Ориентир: ${escapeHtml(order.landmark)}</div>` : ''}
-          <div class="text-[11px] text-charcoal-muted pl-5">🕒 Время визита: <b class="text-emerald-deep">${escapeHtml(order.time_slot || 'В любое время')}</b></div>
-          <div class="pl-5 pt-0.5">${assignmentBadge}</div>
-        </div>
 
-        <!-- Carpets count & payment status -->
-        <div class="bg-emerald-deep/5 p-2 rounded-xl text-xs flex items-center justify-between text-emerald-deep font-bold">
-          <span>📦 Изделий: ${carpetsCount} шт (${(order.total_m2 || 0)} м²)</span>
-          <span>${order.paid ? '● Оплачен' : '○ Расчет при сдаче'}</span>
-        </div>
+          <!-- Row 3: Address & Landmark -->
+          <div class="text-xs text-charcoal-muted flex items-start gap-1 leading-snug">
+            ${getSvgIcon('map-pin', 'w-3.5 h-3.5 text-emerald-deep shrink-0 mt-0.5')}
+            <span class="line-clamp-2">${escapeHtml(order.client_address)} <b class="text-emerald-deep font-semibold">(${escapeHtml(order.district || 'Самарканд')})</b></span>
+          </div>
+          ${order.landmark ? `<div class="text-[11px] text-charcoal-muted pl-4 truncate font-medium">📍 ${escapeHtml(order.landmark)}</div>` : ''}
 
-        <!-- Prominent Dispatcher Comment / Instructions for Courier -->
-        ${order.notes ? `
-          <div class="bg-amber-500/10 border-2 border-amber-500/40 rounded-xl p-3 text-xs text-amber-950 font-medium space-y-1.5 shadow-xs">
-            <div class="flex items-center gap-1.5 font-bold text-amber-900 text-xs">
-              ${getSvgIcon('message-square', 'w-4 h-4 text-amber-700 shrink-0')}
-              <span>💬 Комментарий диспетчера:</span>
-            </div>
-            <div class="pl-5 text-charcoal font-semibold text-xs leading-relaxed whitespace-pre-wrap">${escapeHtml(order.notes)}</div>
-          </div>
-        ` : ''}
-
-        <!-- GPS Location Status Block -->
-        <div class="flex items-center justify-between gap-2 p-2.5 rounded-xl border ${hasExactGps ? 'bg-emerald-50 border-emerald-300 text-emerald-900' : 'bg-amber-50 border-amber-200 text-amber-900'} text-xs">
-          <div class="flex items-center gap-2 overflow-hidden flex-1 cursor-pointer" onclick="openNavigationModal('${order.id}')" title="Нажмите, чтобы открыть маршрут в Яндекс или Google Maps">
-            ${getSvgIcon('map-pin', `w-4 h-4 ${hasExactGps ? 'text-emerald-700' : 'text-amber-700'} shrink-0`)}
-            <div class="truncate font-bold text-xs">
-              ${hasExactGps ? `🎯 GPS дома: ${displayGpsText}` : `📍 Район (${order.district || 'Самарканд'})`}
-            </div>
-          </div>
-          <div class="flex items-center gap-1.5 shrink-0">
-            <button type="button" onclick="openNavigationModal('${order.id}')" class="min-h-[38px] px-2.5 py-1.5 rounded-xl font-bold text-xs bg-emerald-deep text-butter hover:bg-emerald-hover transition shadow-xs flex items-center gap-1" title="Открыть выбор навигатора">
-              ${getSvgIcon('navigation', 'w-3.5 h-3.5 text-butter')}
-              <span>Маршрут</span>
-            </button>
-            <button type="button" onclick="openLocationModal('${order.id}', false)" class="min-h-[38px] px-2.5 py-1.5 rounded-xl font-bold text-xs bg-white border border-emerald-deep/20 text-charcoal hover:bg-butter transition shadow-xs" title="Указать/изменить точку на карте">
-              ${getSvgIcon('map', 'w-3.5 h-3.5 text-emerald-deep')}
-            </button>
-          </div>
-        </div>
-
-        <!-- Quick Action Buttons: Phone & Call History & Navigators (Ergonomic touch zones) -->
-        <div class="space-y-2 pt-1">
-          <!-- Row 1: Phone call + Call history counter + Telegram -->
-          <div class="flex items-center gap-2">
-            <button type="button" onclick="callClient('${order.id}', '${escapeHtml(order.client_phone)}', '${escapeHtml(order.client_name)}')" class="flex-1 min-h-[44px] py-2 px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-emerald-hover active:scale-[0.98] transition shadow-sm">
-              ${getSvgIcon('phone-call', 'w-4 h-4 text-butter shrink-0')}
-              <span>Позвонить</span>
-            </button>
-            <button type="button" onclick="openCallHistoryModal('${order.id}', '${escapeHtml(order.client_phone)}', '${escapeHtml(order.client_name)}')" class="min-h-[44px] px-3 bg-emerald-deep/10 text-emerald-deep hover:bg-emerald-deep/20 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 shrink-0" title="История звонков (${callsCount} вызовов)">
-              <span class="text-xs">📞</span>
-              <span class="text-xs font-mono font-extrabold">${callsCount > 0 ? callsCount : '0'}</span>
-            </button>
-            <button type="button" onclick="sendOrderToTelegram('${order.id}')" class="min-h-[44px] px-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold hover:bg-blue-100 active:scale-[0.98] transition shadow-sm flex items-center justify-center gap-1 shrink-0" title="Отправить карточку в Telegram">
-              ${getSvgIcon('send', 'w-4 h-4 text-blue-600 shrink-0')}
-              <span class="text-[11px] hidden sm:inline">Telegram</span>
-            </button>
-          </div>
-          <!-- Row 2: Navigators with equal width and generous touch targets -->
-          <div class="grid grid-cols-2 gap-2">
-            <button type="button" onclick="navigateToOrder('${order.id}', 'yandex')" class="min-h-[44px] py-2 px-2.5 bg-amber-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-amber-600 active:scale-[0.98] transition shadow-sm truncate" title="Яндекс Навигатор">
-              ${getSvgIcon('navigation', 'w-4 h-4 text-white shrink-0')}
-              <span class="truncate">Яндекс Карты</span>
-            </button>
-            <button type="button" onclick="navigateToOrder('${order.id}', 'google')" class="min-h-[44px] py-2 px-2.5 bg-blue-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-blue-700 active:scale-[0.98] transition shadow-sm truncate" title="Google Maps">
-              ${getSvgIcon('map', 'w-4 h-4 text-white shrink-0')}
-              <span class="truncate">Google Maps</span>
-            </button>
-          </div>
-          <!-- Row 3: Photo capture and defect inspection -->
-          <button type="button" onclick="openOrderPhotosModal('${order.id}')" class="w-full min-h-[44px] py-2 px-3 bg-white border-2 border-emerald-deep/20 hover:border-emerald-deep text-emerald-deep rounded-xl text-xs font-bold flex items-center justify-between transition shadow-xs">
-            <span class="flex items-center gap-1.5">
-              <span>📸</span>
-              <span>Фото ковра и дефектов:</span>
+          <!-- Row 4: Chips (Carpets, Paid, Time) -->
+          <div class="flex flex-wrap items-center gap-1 text-[11px] pt-0.5">
+            <span class="px-2 py-0.5 rounded-lg bg-emerald-deep/5 text-emerald-deep font-bold border border-emerald-deep/10">
+              📦 ${carpetsCount} шт (${(order.total_m2 || 0)} м²)
             </span>
-            <span class="px-2.5 py-0.5 rounded-full ${photosCount > 0 ? 'bg-blue-100 text-blue-800 border border-blue-200' : 'bg-gray-100 text-charcoal-muted'} font-mono font-bold text-[10px]">
-              ${photosCount > 0 ? `${photosCount} фото` : 'Добавить фото'}
+            <span class="px-2 py-0.5 rounded-lg font-bold border ${order.paid ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-amber-50 text-amber-900 border-amber-200'}">
+              ${order.paid ? '● Оплачен' : '○ Расчет при сдаче'}
             </span>
+            <span class="px-1.5 py-0.5 rounded-lg bg-black/5 text-charcoal-muted text-[10px]">
+              🕒 ${escapeHtml(order.time_slot || 'В любое время')}
+            </span>
+          </div>
+
+          <!-- Dispatcher Note (compact if present) -->
+          ${order.notes ? `
+            <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-2 text-[11px] text-amber-950 font-medium">
+              <div class="flex items-center gap-1 font-bold text-amber-900 text-[10px] uppercase">
+                ${getSvgIcon('message-square', 'w-3 h-3 text-amber-700 shrink-0')}
+                <span>Диспетчер:</span>
+              </div>
+              <div class="line-clamp-2 pl-3 text-charcoal font-medium text-[11px] leading-tight mt-0.5">${escapeHtml(order.notes)}</div>
+            </div>
+          ` : ''}
+
+          <!-- Detailed Order Info Button -->
+          <button type="button" onclick="openCourierOrderInfoModal('${order.id}')" class="w-full py-2 px-3 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 text-xs font-bold flex items-center justify-between transition active:scale-[0.98] shadow-2xs">
+            <span class="flex items-center gap-1.5 truncate">
+              <span class="text-sm">ℹ️</span>
+              <span class="truncate">Информация о заказе (${carpetsCount} шт${order.total_m2 ? ', ' + order.total_m2 + ' м²' : ''})</span>
+            </span>
+            <span class="text-[10px] text-purple-700 font-semibold shrink-0">Размеры & Чек ➔</span>
           </button>
         </div>
 
-        <!-- Big Stage Completion Button (Min 48px height) -->
-        <div class="pt-1">
-          ${actionButtonHtml}
+        <!-- Bottom Actions (Ergonomic square toolbar + Primary button) -->
+        <div class="space-y-2 pt-2 border-t border-emerald-deep/10">
+          <!-- 4-Button Toolbar: Call, Telegram, Yandex Navigator, Photos -->
+          <div class="grid grid-cols-4 gap-1.5">
+            <!-- Call Button (1-Click Native Dialer) -->
+            <button type="button" onclick="callClient('${order.id}')" class="min-h-[46px] py-1.5 px-1 rounded-xl bg-emerald-deep text-butter text-xs font-bold flex flex-col items-center justify-center gap-0.5 hover:bg-emerald-hover active:scale-[0.96] transition shadow-2xs" title="Позвонить клиенту (${callsCount} вызовов)">
+              ${getSvgIcon('phone-call', 'w-4 h-4 text-butter')}
+              <span class="text-[10px] leading-none">${callsCount > 0 ? `Звонок (${callsCount})` : 'Звонок'}</span>
+            </button>
+
+            <!-- Telegram Button (1-Click Direct Chat with Client) -->
+            <button type="button" onclick="contactClientTelegram('${order.id}')" class="min-h-[46px] py-1.5 px-1 rounded-xl bg-blue-50 text-blue-700 border border-blue-200 text-xs font-bold flex flex-col items-center justify-center gap-0.5 hover:bg-blue-100 active:scale-[0.96] transition shadow-2xs" title="Написать клиенту в Telegram">
+              ${getSvgIcon('send', 'w-4 h-4 text-blue-600')}
+              <span class="text-[10px] leading-none">Telegram</span>
+            </button>
+
+            <!-- Navigator Button: 1-Click to Yandex Navigator ONLY -->
+            <button type="button" onclick="navigateToOrder('${order.id}', 'yandex')" class="min-h-[46px] py-1.5 px-1 rounded-xl bg-amber-500 text-white text-xs font-bold flex flex-col items-center justify-center gap-0.5 hover:bg-amber-600 active:scale-[0.96] transition shadow-2xs" title="Маршрут в Яндекс Навигаторе (${hasExactGps ? 'GPS дома' : order.district || 'Самарканд'})">
+              ${getSvgIcon('navigation', 'w-4 h-4 text-white')}
+              <span class="text-[10px] leading-none truncate">Яндекс</span>
+            </button>
+
+            <!-- Photos Button -->
+            <button type="button" onclick="openOrderPhotosModal('${order.id}')" class="min-h-[46px] py-1.5 px-1 rounded-xl bg-white border border-emerald-deep/20 text-emerald-deep text-xs font-bold flex flex-col items-center justify-center gap-0.5 hover:bg-butter transition shadow-2xs" title="Фото изделий (${photosCount})">
+              <span class="text-xs leading-none">📸</span>
+              <span class="text-[10px] leading-none font-mono font-bold">${photosCount > 0 ? `${photosCount} фото` : '+ Фото'}</span>
+            </button>
+          </div>
+
+          <!-- Main Stage Action Button -->
+          <div>
+            ${actionButtonHtml}
+          </div>
         </div>
       </div>
     `;
@@ -6344,11 +6906,7 @@ function initCourierPortalMap() {
 
         <div style="margin-top: 8px; display:flex; flex-direction:column; gap:4px;">
           <button type="button" onclick="callClient('${order.id}', '${escapeHtml(order.client_phone)}', '${escapeHtml(order.client_name)}')" style="background:#04222B; color:#98D8D0; border:none; padding:5px 8px; border-radius:6px; font-size:11px; font-weight:bold; cursor:pointer; text-align:center;">📞 Позвонить (${escapeHtml(order.client_phone)})</button>
-          <div style="display:flex; gap:4px;">
-            <button type="button" onclick="navigateToOrder('${order.id}', 'yandex')" style="flex:1; background:#d97706; color:#fff; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">🧭 Яндекс</button>
-            <button type="button" onclick="navigateToOrder('${order.id}', 'google')" style="flex:1; background:#2563eb; color:#fff; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">🗺️ Google</button>
-            <button type="button" onclick="openNavigationModal('${order.id}')" style="flex:1; background:#04222B; color:#98D8D0; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">Подробнее</button>
-          </div>
+          <button type="button" onclick="navigateToOrder('${order.id}', 'yandex')" style="width:100%; background:#d97706; color:#fff; padding:7px 10px; border-radius:8px; border:none; font-size:11px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px;">🧭 Яндекс Навигатор</button>
           <button type="button" onclick="openLocationModal('${order.id}', false)" style="background:#f3f4f6; color:#374151; border:1px solid #d1d5db; padding:3px 6px; border-radius:6px; font-size:10px; font-weight:bold; cursor:pointer; margin-top:2px;">📍 ${isExactGps ? 'Изменить координаты' : '🎯 Зафиксировать точку GPS'}</button>
         </div>
       </div>
@@ -7504,91 +8062,120 @@ function printReceiptForCurrentOrder() {
 }
 
 function printOrderReceipt(orderId) {
-  const order = activeOrders.find(o => o.id === orderId);
+  // Проверка прав: вывод чека доступен только руководителю, диспетчеру и курьеру
+  const role = currentUser?.role;
+  if (role && !['admin', 'dispatcher', 'courier'].includes(role)) {
+    alert('Печать товарного чека доступна только руководителю, диспетчеру и курьеру.');
+    return;
+  }
+
+  const order = activeOrders.find(o => String(o.id) === String(orderId));
   if (!order) return;
 
   const totalSum = order.total_price || 0;
   const paidSum = order.paid ? totalSum : (order.paid_amount || 0);
   const remaining = Math.max(0, totalSum - paidSum);
 
-  const items = order.carpets && order.carpets.length > 0 ? order.carpets : [{ name: 'Ковры', unit: 'м²', qty: 1, total: totalSum }];
+  let items = [];
+  try {
+    items = order.carpets ? (typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets) : [];
+  } catch (e) {
+    items = [];
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    items = [{ name: 'Ковер', length: null, width: null, area: order.total_m2 || 0, price: 14000, total: totalSum }];
+  }
 
   const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 95 032 33 30';
   const courierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
   const courierDisplay = `${escapeHtml(order.courier_name || 'Дамир')} (Тел: ${courierPhone})`;
 
   const html = `
-    <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.35; color: #000; width: 76mm; margin: 0 auto;">
+    <div style="font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 11px; line-height: 1.35; color: #000; width: 76mm; margin: 0 auto; padding: 4px 2px;">
       <div style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px;">
-        <div style="font-size: 18px; font-weight: 900; letter-spacing: 1px;">COSMO CRM</div>
-        <div style="font-size: 10px; font-weight: 700;">ПРОФЕССИОНАЛЬНАЯ СТИРКА КОВРОВ</div>
-        <div style="font-size: 10px; font-weight: 800; margin-top: 2px;">Тел: ${companyPhone} • Самарканд</div>
+        <div style="font-size: 20px; font-weight: 900; letter-spacing: 1.5px;">COSMO</div>
+        <div style="font-size: 10px; font-weight: 800; margin-top: 1px;">ПРОФЕССИОНАЛЬНАЯ СТИРКА КОВРОВ</div>
+        <div style="font-size: 9px; margin-top: 2px;">Тел: ${companyPhone} • Самарканд</div>
       </div>
 
-      <div style="display: flex; justify-content: space-between; font-weight: 800; font-size: 13px; margin-bottom: 4px;">
-        <span>КВИТАНЦИЯ-НАКЛАДНАЯ</span>
+      <div style="display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-bottom: 3px;">
+        <span>ТОВАРНЫЙ ЧЕК</span>
         <span>#${order.id}</span>
       </div>
-      <div style="font-size: 10px; margin-bottom: 6px;">Дата: ${order.pickup_date || order.created_at}</div>
+      <div style="font-size: 10px; margin-bottom: 6px;">Дата: ${order.pickup_date || order.created_at || new Date().toLocaleDateString('ru-RU')}</div>
 
-      <div style="border-top: 1px dashed #000; padding-top: 4px; margin-bottom: 6px; font-size: 10px;">
+      <div style="border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 5px 0; margin-bottom: 8px; font-size: 10px;">
         <div><b>Клиент:</b> ${escapeHtml(order.client_name)}</div>
         <div><b>Тел:</b> ${escapeHtml(order.client_phone)}</div>
-        <div><b>Адрес:</b> ${escapeHtml(order.client_address)}</div>
-        <div><b>Экипаж / Курьер:</b> ${courierDisplay}</div>
+        <div><b>Адрес:</b> ${escapeHtml(order.client_address)} (${escapeHtml(order.district || 'Самарканд')})</div>
+        ${order.landmark ? `<div><b>Ориентир:</b> ${escapeHtml(order.landmark)}</div>` : ''}
+        <div><b>Курьер / Экипаж:</b> ${courierDisplay}</div>
       </div>
 
-      <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 6px;">
+      <div style="font-weight: 900; font-size: 10px; margin-bottom: 4px; text-transform: uppercase;">ИЗДЕЛИЯ И ЗАМЕРЫ:</div>
+      <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 8px;">
         <thead>
-          <tr style="border-bottom: 1px solid #000; font-weight: bold;">
-            <th style="text-align: left; padding: 2px 0;">Наименование</th>
-            <th style="text-align: center; padding: 2px 0;">Размер</th>
-            <th style="text-align: right; padding: 2px 0;">Сумма</th>
+          <tr style="border-bottom: 1.5px solid #000; font-weight: bold;">
+            <th style="text-align: left; padding: 3px 0;">№ Изделие / Размеры</th>
+            <th style="text-align: center; padding: 3px 0;">м² / шт</th>
+            <th style="text-align: right; padding: 3px 0;">Сумма</th>
           </tr>
         </thead>
         <tbody>
-          ${items.map(it => {
-            const area = it.area || (it.length && it.width ? +(it.length * it.width).toFixed(1) : 0);
-            const sizeDisplay = it.unit === 'м²' ? `${area}м²` : `${it.qty || 1}${it.unit || 'шт'}`;
+          ${items.map((it, idx) => {
+            const length = it.length ? Number(it.length) : null;
+            const width = it.width ? Number(it.width) : null;
+            const dims = (length && width) ? `${length.toFixed(2)} × ${width.toFixed(2)} м` : '';
+            const area = it.area || (length && width ? +(length * width).toFixed(2) : 0);
+            const sizeDisplay = it.unit === 'м²' || (!it.unit && area > 0) ? `${area} м²` : `${it.qty || 1} шт`;
+            const priceRate = it.price ? ` по ${Number(it.price).toLocaleString()} сум` : '';
             const sumDisplay = (it.total || (it.price * (area || 1)) || 0).toLocaleString();
             return `
-            <tr>
-              <td style="padding: 2px 0;">
-                ${escapeHtml(it.name)}
+            <tr style="border-bottom: 1px dotted #ccc;">
+              <td style="padding: 4px 0;">
+                <b>#${idx + 1}. ${escapeHtml(it.name || 'Ковер')}</b>
+                ${dims ? `<div style="font-size: 9px; color: #222;">Размер: ${dims}${priceRate}</div>` : (priceRate ? `<div style="font-size: 9px; color: #222;">Тариф:${priceRate}</div>` : '')}
                 ${it.defects ? `<div style="font-size: 8px; color: #555; font-style: italic;">Дефекты: ${escapeHtml(it.defects)}</div>` : ''}
               </td>
-              <td style="text-align: center; padding: 2px 0;">${sizeDisplay}</td>
-              <td style="text-align: right; padding: 2px 0;">${sumDisplay}</td>
+              <td style="text-align: center; padding: 4px 0; font-weight: bold;">${sizeDisplay}</td>
+              <td style="text-align: right; padding: 4px 0; font-weight: bold;">${sumDisplay} сум</td>
             </tr>
           `;
           }).join('')}
         </tbody>
       </table>
 
-      <div style="border-top: 1.5px solid #000; padding-top: 4px; font-size: 11px;">
-        <div style="display: flex; justify-content: space-between; font-weight: 900; font-size: 13px;">
-          <span>ИТОГО К ОПЛАТЕ:</span>
+      <div style="border-top: 2px solid #000; padding-top: 5px; font-size: 11px;">
+        <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 11px;">
+          <span>Общая сумма заказа:</span>
           <span>${totalSum.toLocaleString()} сум</span>
         </div>
-        <div style="display: flex; justify-content: space-between; margin-top: 2px;">
-          <span>Оплачено:</span>
+        <div style="display: flex; justify-content: space-between; margin-top: 2px; font-size: 10px;">
+          <span>Внесено / Оплачено:</span>
           <span>${paidSum.toLocaleString()} сум</span>
         </div>
-        <div style="display: flex; justify-content: space-between; font-weight: bold; margin-top: 2px;">
-          <span>Остаток долга:</span>
+        <div style="display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-top: 4px; border-top: 1px dashed #000; padding-top: 3px;">
+          <span>ИТОГО К ОПЛАТЕ:</span>
           <span>${remaining.toLocaleString()} сум</span>
         </div>
       </div>
 
-      <div style="text-align: center; margin-top: 10px; padding-top: 6px; border-top: 1px dashed #000;">
+      <div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #000; font-size: 9px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+          <span>Сдал (Курьер): _________</span>
+          <span>Принял (Клиент): _________</span>
+        </div>
+      </div>
+
+      <div style="text-align: center; margin-top: 8px; padding-top: 6px; border-top: 1px dashed #000;">
         <div style="font-size: 9px; font-weight: bold;">ОНЛАЙН ТРЕКИНГ ЗАКАЗА:</div>
         <div id="receipt-qr-${order.id}" style="display: flex; justify-content: center; margin: 4px 0;"></div>
         <div style="font-size: 8px;">Наведите камеру смартфона для отслеживания</div>
       </div>
 
-      <div style="font-size: 9px; text-align: center; margin-top: 8px; color: #111; border-top: 1px solid #000; padding-top: 4px;">
+      <div style="font-size: 8px; text-align: center; margin-top: 8px; color: #222; border-top: 1px solid #000; padding-top: 4px;">
         <div style="font-weight: 800;">Горячая линия: ${companyPhone} • Курьер: ${courierPhone}</div>
-        <div style="font-size: 8px; color: #444; margin-top: 2px;">Спасибо за доверие! Ковры проходят сушку в термокамере и антибактериальную обработку.</div>
+        <div style="margin-top: 2px;">Спасибо за доверие! Стирка ковров на турецком оборудовании и сушка в камере.</div>
       </div>
     </div>
   `;
@@ -9199,5 +9786,10 @@ window.exportOrdersCSV = exportOrdersCSV;
 window.triggerLiquidRipple = triggerLiquidRipple;
 window.updateLiquidNavIndicator = updateLiquidNavIndicator;
 window.renderMobileBottomNav = renderMobileBottomNav;
+window.openCourierShiftModal = openCourierShiftModal;
+window.reloadModalShiftData = reloadModalShiftData;
+window.recalcModalShiftNetCash = recalcModalShiftNetCash;
+window.submitCourierShiftFromModal = submitCourierShiftFromModal;
+window.printModalZReport = printModalZReport;
 
 

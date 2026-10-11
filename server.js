@@ -298,6 +298,7 @@ async function initDatabase() {
   await tryAddCol('courier_shifts', 'click_collected INTEGER DEFAULT 0');
   await tryAddCol('courier_shifts', 'payme_collected INTEGER DEFAULT 0');
   await tryAddCol('courier_shifts', 'debts_total INTEGER DEFAULT 0');
+  await tryAddCol('courier_shifts', 'card_collected INTEGER DEFAULT 0');
   await tryAddCol('courier_shifts', 'expenses_total INTEGER DEFAULT 0');
   await tryAddCol('courier_shifts', 'status TEXT DEFAULT "accepted"');
   await tryAddCol('courier_shifts', 'accepted_by TEXT DEFAULT ""');
@@ -817,6 +818,42 @@ function removeCachedOrder(id) {
   ordersMemory = ordersMemory.filter(o => String(o.id).trim() !== String(id).trim());
 }
 
+// Очередь асинхронной синхронизации в Google Таблицы (устраняет задержку HTTP ответов и защищает от 429/lock)
+const sheetsSyncQueue = [];
+let isProcessingSheetsQueue = false;
+
+function enqueueSheetsSync(order, action = 'upsert') {
+  if (!order || !order.id) return;
+  const targetId = String(order.id).trim();
+  const idx = sheetsSyncQueue.findIndex(item => String(item.order.id).trim() === targetId);
+  if (idx !== -1) {
+    sheetsSyncQueue[idx] = { order, action, timestamp: Date.now() };
+  } else {
+    sheetsSyncQueue.push({ order, action, timestamp: Date.now() });
+  }
+  setImmediate(processSheetsQueue);
+}
+
+async function processSheetsQueue() {
+  if (isProcessingSheetsQueue || sheetsSyncQueue.length === 0) return;
+  isProcessingSheetsQueue = true;
+  try {
+    while (sheetsSyncQueue.length > 0) {
+      const item = sheetsSyncQueue.shift();
+      try {
+        await syncOrderToGoogleSheets(item.order, item.action);
+      } catch (e) {
+        console.warn(`[SheetsQueue] Error syncing order #${item.order?.id}:`, e.message);
+      }
+      if (sheetsSyncQueue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 120));
+      }
+    }
+  } finally {
+    isProcessingSheetsQueue = false;
+  }
+}
+
 async function syncOrdersFromGoogleSheets(force = false) {
   const now = Date.now();
   if (!force && (now - lastSheetsSyncTime < 10000)) return ordersMemory;
@@ -825,7 +862,13 @@ async function syncOrdersFromGoogleSheets(force = false) {
   lastSheetsSyncTime = now;
 
   try {
-    const res = await fetch(DEFAULT_GOOGLE_SHEETS_CSV_URL, { redirect: 'follow' });
+    const sep = DEFAULT_GOOGLE_SHEETS_CSV_URL.includes('?') ? '&' : '?';
+    const fetchUrl = `${DEFAULT_GOOGLE_SHEETS_CSV_URL}${sep}_cb=${Date.now()}`;
+    const res = await fetch(fetchUrl, {
+      redirect: 'follow',
+      headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' },
+      signal: AbortSignal.timeout(6000)
+    });
     if (!res.ok) {
       isSyncingFromSheets = false;
       return ordersMemory;
@@ -964,7 +1007,8 @@ async function syncOrderToGoogleSheets(order, action = 'upsert') {
         sheet_name: 'Cosmo',
         order: payloadOrder
       }),
-      redirect: 'follow'
+      redirect: 'follow',
+      signal: AbortSignal.timeout(6000)
     });
 
     const data = await res.json().catch(() => null);
@@ -1289,11 +1333,11 @@ app.post('/api/orders', async (req, res) => {
       [orderId, dispatcher_name || 'Диспетчер', `Создан заказ #${orderId}`, new Date().toISOString()]);
   } catch(e) {}
 
-  // Автоматические уведомления и прямая запись в Google Таблицы
+  // Автоматические уведомления и прямая запись в Google Таблицы (через неблокирующую очередь)
   sendTelegramNotification(formatTelegramOrderCard(createdOrder)).catch(e => console.warn('TG auto notify err:', e.message));
   const smsMsg = formatSmsMessage('created', createdOrder, items, totalM2, totalPrice);
   sendEskizSms(trimmedPhone, smsMsg, orderId).catch(e => console.warn('SMS auto notify err:', e.message));
-  syncOrderToGoogleSheets(createdOrder, 'upsert').catch(e => console.warn('Sheets auto-sync err:', e.message));
+  enqueueSheetsSync(createdOrder, 'upsert');
 
   res.json({ success: true, orderId, id: orderId, total_price: totalPrice });
 });
@@ -1427,7 +1471,7 @@ app.put('/api/orders/:id', async (req, res) => {
     order.sms_sent_stages = sentStages.join(',');
   }
 
-  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  enqueueSheetsSync(order, 'upsert');
 
   res.json({ success: true, id: currentId });
 });
@@ -1504,7 +1548,7 @@ app.patch('/api/orders/:id/stage', async (req, res) => {
       [id, actor_name || 'Сотрудник', `Смена статуса: ${oldStage} -> ${stage}`, new Date().toISOString()]);
   } catch(e) {}
 
-  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  enqueueSheetsSync(order, 'upsert');
 
   res.json({ success: true, order, sms_simulated: Boolean(smsResult?.simulated) });
 });
@@ -1526,7 +1570,7 @@ app.patch('/api/orders/:id/assign-courier', async (req, res) => {
       [id, actor, `Назначен курьер: ${cleanedCourier || 'Свободный экипаж'}`, new Date().toISOString()]);
   } catch (e) {}
 
-  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  enqueueSheetsSync(order, 'upsert');
   res.json({ success: true, order, courier_name: cleanedCourier });
 });
 
@@ -1550,7 +1594,7 @@ app.patch('/api/orders/:id/location', async (req, res) => {
     } catch (e) {}
   }
 
-  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  enqueueSheetsSync(order, 'upsert');
   res.json({ success: true, order });
 });
 
@@ -1669,7 +1713,7 @@ app.patch('/api/orders/:id/measurements', async (req, res) => {
       sendTelegramNotification(readyTgMsg).catch(e => console.warn('TG ready notify err:', e.message));
     }
 
-    syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+    enqueueSheetsSync(order, 'upsert');
 
     res.json({
       success: true,
@@ -1735,7 +1779,7 @@ app.patch('/api/orders/:id/delivery-complete', async (req, res) => {
       }
     }
 
-    syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+    enqueueSheetsSync(order, 'upsert');
 
     res.json({ success: true, fully_paid: isFullyPaid, remaining_debt: Math.max(0, total - paidAmt) });
   } catch (err) {
@@ -1757,8 +1801,7 @@ app.delete('/api/orders/:id', async (req, res) => {
 
   upsertCachedOrder(order);
 
-  syncOrderToGoogleSheets({ id, delete_reason: reason || 'Удален пользователем' }, 'delete')
-    .catch(e => console.warn('Sheets sync delete err:', e.message));
+  enqueueSheetsSync({ id, delete_reason: reason || 'Удален пользователем' }, 'delete');
 
   res.json({ success: true, id });
 });
@@ -1775,14 +1818,14 @@ app.post('/api/orders/:id/restore', async (req, res) => {
 
   upsertCachedOrder(order);
 
-  syncOrderToGoogleSheets(order, 'upsert').catch(e => console.warn('Sheets sync err:', e.message));
+  enqueueSheetsSync(order, 'upsert');
   res.json({ success: true });
 });
 
 app.delete('/api/orders/:id/permanent', async (req, res) => {
   const { id } = req.params;
   removeCachedOrder(id);
-  syncOrderToGoogleSheets({ id, delete_reason: 'Удален навсегда' }, 'delete').catch(() => {});
+  enqueueSheetsSync({ id, delete_reason: 'Удален навсегда' }, 'delete');
   res.json({ success: true });
 });
 
@@ -1790,7 +1833,7 @@ app.post('/api/orders/trash/clear', async (req, res) => {
   const trashed = ordersMemory.filter(o => o.is_deleted);
   ordersMemory = ordersMemory.filter(o => !o.is_deleted);
   trashed.forEach(t => {
-    syncOrderToGoogleSheets({ id: t.id, delete_reason: 'Очистка корзины' }, 'delete').catch(() => {});
+    enqueueSheetsSync({ id: t.id, delete_reason: 'Очистка корзины' }, 'delete');
   });
   res.json({ success: true });
 });
@@ -1803,7 +1846,7 @@ app.post('/api/orders/:id/review', async (req, res) => {
     order.rating = Number(rating) || 5;
     order.review_text = String(review_text || '').trim();
     upsertCachedOrder(order);
-    syncOrderToGoogleSheets(order, 'upsert').catch(() => {});
+    enqueueSheetsSync(order, 'upsert');
   }
   res.json({ success: true });
 });
@@ -2155,7 +2198,7 @@ app.post('/api/finance/debts/pay', async (req, res) => {
     `, [order_id, 'Бухгалтерия / Касса', `Погашение долга: +${numAmount.toLocaleString()} сум (${method || 'Наличные'})`, new Date().toISOString()]);
   } catch (e) {}
 
-  syncOrderToGoogleSheets(order, 'upsert').catch(() => {});
+  enqueueSheetsSync(order, 'upsert');
 
   res.json({ success: true, new_paid: newPaid, fully_paid: isFullyPaid });
 });
@@ -2258,61 +2301,165 @@ app.get('/api/finance/courier-shift', async (req, res) => {
   }
 });
 
-app.post('/api/finance/courier-shift/accept', async (req, res) => {
+const handleCourierShiftAccept = async (req, res) => {
   try {
-    const { courier_name, date, net_cash, actor_name, notes, orders_count, cash_collected, click_collected, payme_collected, debts_total, expenses_total } = req.body;
+    const { courier_name, date, net_cash, actor_name, notes, orders_count, cash_collected, click_collected, payme_collected, card_collected, debts_total, debts_list, expenses_total, expense_note } = req.body;
     if (!courier_name || !date) return res.status(400).json({ error: 'Укажите курьера и дату' });
 
     const shiftDate = date;
-    const actor = actor_name || 'Руководитель';
-    const amount = Number(net_cash) || 0;
+    const dateFormattedRu = shiftDate.split('-').reverse().join('.');
+    const currentTimeRu = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const actor = actor_name || req.user?.name || 'Курьер';
+    const amount = Number(net_cash) >= 0 ? Number(net_cash) : Math.max(0, (Number(cash_collected) || 0) - (Number(expenses_total) || 0));
+
+    // Автоматическая фиксация расхода курьера (ГСМ/бензин) в авансах и транзакциях, если передан расход > 0
+    if (Number(expenses_total) > 0) {
+      const existingAdv = await db.get(
+        `SELECT id FROM salary_advances WHERE (employee_name = ? OR LOWER(employee_name) = LOWER(?)) AND date = ? AND (note LIKE '%ГСМ%' OR note LIKE '%расход%' OR note = ?)`,
+        [courier_name, courier_name, shiftDate, expense_note || 'Служебный расход за смену (ГСМ)']
+      );
+      if (!existingAdv) {
+        const advId = `ADV-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        await db.run(`
+          INSERT INTO salary_advances (id, employee_id, employee_name, employee_role, amount, date, note, method, created_at)
+          VALUES (?, NULL, ?, 'courier', ?, ?, ?, 'Наличные', ?)
+        `, [advId, courier_name, Number(expenses_total), shiftDate, expense_note || 'Служебный расход за смену (ГСМ)', new Date().toISOString()]);
+
+        await db.run(`
+          INSERT INTO transactions (id, type, title, amount, date, method)
+          VALUES (?, 'out', ?, ?, ?, 'Наличные')
+        `, [`TX-EXP-${Date.now()}`, `ГСМ/Расход курьера ${courier_name} за смену ${shiftDate}`, Number(expenses_total), new Date().toLocaleString('ru-RU')]);
+      }
+    }
+
+    const totalDelivered = (Number(cash_collected) || 0) + (Number(click_collected) || 0) + (Number(payme_collected) || 0) + (Number(card_collected) || 0) + (Number(debts_total) || 0);
 
     const existingShift = await db.get(
-      'SELECT id FROM courier_shifts WHERE courier_name = ? AND shift_date = ?',
-      [courier_name, shiftDate]
+      'SELECT id FROM courier_shifts WHERE (courier_name = ? OR LOWER(courier_name) = LOWER(?)) AND shift_date = ?',
+      [courier_name, courier_name, shiftDate]
     );
+
     if (existingShift) {
-      return res.status(400).json({ error: `Смена курьера ${courier_name} за ${shiftDate} уже была принята в кассу!` });
-    }
-
-    await db.run(`
-      INSERT INTO courier_shifts (
-        courier_name, shift_date, orders_count, total_delivered_sum, cash_collected,
-        click_collected, payme_collected, debts_total, expenses_total, net_cash_submitted,
-        status, accepted_by, accepted_at, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?)
-    `, [
-      courier_name,
-      shiftDate,
-      Number(orders_count) || 0,
-      (Number(cash_collected) || 0) + (Number(click_collected) || 0) + (Number(payme_collected) || 0) + (Number(debts_total) || 0),
-      Number(cash_collected) || 0,
-      Number(click_collected) || 0,
-      Number(payme_collected) || 0,
-      Number(debts_total) || 0,
-      Number(expenses_total) || 0,
-      amount,
-      actor,
-      new Date().toISOString(),
-      notes || ''
-    ]);
-
-    if (amount > 0) {
       await db.run(`
-        INSERT INTO transactions (id, type, title, amount, date, method)
-        VALUES (?, 'in', ?, ?, ?, 'Наличные')
-      `, [`TX-SHIFT-${Date.now()}`, `Сдача кассы курьером ${courier_name} за ${shiftDate}`, amount, new Date().toLocaleString('ru-RU')]);
+        UPDATE courier_shifts
+        SET orders_count = ?, total_delivered_sum = ?, cash_collected = ?,
+            click_collected = ?, payme_collected = ?, card_collected = ?,
+            debts_total = ?, expenses_total = ?, net_cash_submitted = ?,
+            status = 'accepted', accepted_by = ?, accepted_at = ?, notes = ?
+        WHERE id = ?
+      `, [
+        Number(orders_count) || 0,
+        totalDelivered,
+        Number(cash_collected) || 0,
+        Number(click_collected) || 0,
+        Number(payme_collected) || 0,
+        Number(card_collected) || 0,
+        Number(debts_total) || 0,
+        Number(expenses_total) || 0,
+        amount,
+        actor,
+        new Date().toISOString(),
+        notes || '',
+        existingShift.id
+      ]);
+    } else {
+      await db.run(`
+        INSERT INTO courier_shifts (
+          courier_name, shift_date, orders_count, total_delivered_sum, cash_collected,
+          click_collected, payme_collected, card_collected, debts_total, expenses_total, net_cash_submitted,
+          status, accepted_by, accepted_at, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?, ?)
+      `, [
+        courier_name,
+        shiftDate,
+        Number(orders_count) || 0,
+        totalDelivered,
+        Number(cash_collected) || 0,
+        Number(click_collected) || 0,
+        Number(payme_collected) || 0,
+        Number(card_collected) || 0,
+        Number(debts_total) || 0,
+        Number(expenses_total) || 0,
+        amount,
+        actor,
+        new Date().toISOString(),
+        notes || ''
+      ]);
     }
+
+    // Фиксация поступления чистых наличных в журнал кассы
+    if (amount > 0) {
+      const existingTx = await db.get('SELECT id FROM transactions WHERE title LIKE ?', [`%${shiftDate}%${courier_name}%`]);
+      if (!existingTx) {
+        await db.run(`
+          INSERT INTO transactions (id, type, title, amount, date, method)
+          VALUES (?, 'in', ?, ?, ?, 'Наличные')
+        `, [`TX-SHIFT-${Date.now()}-${Math.floor(Math.random() * 1000)}`, `Сдача кассы курьером ${courier_name} за ${shiftDate}`, amount, new Date().toLocaleString('ru-RU')]);
+      } else {
+        await db.run('UPDATE transactions SET amount = ? WHERE id = ?', [amount, existingTx.id]);
+      }
+    }
+
+    // ФОРМИРОВАНИЕ И ОТПРАВКА Z-ОТЧЕТА В TELEGRAM
+    const companyRow = await db.get("SELECT value FROM settings WHERE key = 'company_name'");
+    const companyName = companyRow?.value || 'COSMO CRM';
+    const nonCash = (Number(click_collected) || 0) + (Number(payme_collected) || 0) + (Number(card_collected) || 0);
+
+    let debtsSummary = '';
+    if (Array.isArray(debts_list) && debts_list.length > 0) {
+      debtsSummary = debts_list.map((d, i) => `  ${i + 1}. *${d.client_name || 'Клиент'}* (#${d.order_id || ''}) — *${Number(d.debt_amount || 0).toLocaleString('ru-RU')} сум* (${d.reason || 'не указана'})`).join('\n');
+    }
+
+    const zReportTg = 
+`🧾 *ВЕЧЕРНИЙ Z-ОТЧЕТ: СДАЧА КАССЫ*
+━━━━━━━━━━━━━━━━━━━━
+🏢 *${companyName}*
+👤 *Курьер:* ${courier_name}
+📅 *Дата:* ${dateFormattedRu}   🕒 *Время:* ${currentTimeRu}
+👤 *Зафиксировал:* ${actor}
+
+📦 *Доставлено заказов:* ${Number(orders_count) || 0} шт.
+💰 *Общий чек доставок:* ${totalDelivered.toLocaleString('ru-RU')} сум
+
+💵 *Наличные от клиентов:* ${(Number(cash_collected) || 0).toLocaleString('ru-RU')} сум
+💳 *Click:* ${(Number(click_collected) || 0).toLocaleString('ru-RU')} сум
+📱 *Payme:* ${(Number(payme_collected) || 0).toLocaleString('ru-RU')} сум
+💳 *Карта / Терминал:* ${(Number(card_collected) || 0).toLocaleString('ru-RU')} сум
+📊 *Всего безнал:* ${nonCash.toLocaleString('ru-RU')} сум
+${Number(expenses_total) > 0 ? `⛽ *Служебные расходы (ГСМ):* -${Number(expenses_total).toLocaleString('ru-RU')} сум\n   _Причина: ${expense_note || 'ГСМ / бензин / авто'}_\n` : ''}━━━━━━━━━━━━━━━━━━━━
+💵 *К СДАЧЕ В ГЛАВНУЮ КАССУ:*
+👉 *${amount.toLocaleString('ru-RU')} сум*
+━━━━━━━━━━━━━━━━━━━━
+${Number(debts_total) > 0 ? `⚠️ *Остаток долга клиентов (${debts_list?.length || 1} шт):* ${Number(debts_total).toLocaleString('ru-RU')} сум\n${debtsSummary}` : '✅ *Все заказы оплачены на 100%, долгов нет!*'}
+${notes ? `\n📝 *Примечание курьера:* ${notes}` : ''}
+✅ _Касса успешно проведена в CRM_`;
+
+    sendTelegramNotification(zReportTg).catch(e => console.warn('TG z-report notification error:', e.message));
+
+    // Двойное уведомление напрямую на телефон Акобира через Jimmy Bridge
+    try {
+      const { exec } = require('child_process');
+      const bridgeText = zReportTg.replace(/"/g, "'").replace(/\n/g, '\\n');
+      exec(`python C:\\Users\\AKOBIR\\jimmy_telegram\\jimmy_bridge.py report --title "Вечерний Z-отчет: ${courier_name}" --text "${bridgeText}" --status success`, (err) => {
+        if (err) console.warn('Bridge notification error:', err.message);
+      });
+    } catch (e) {}
 
     res.json({
       success: true,
-      message: `Касса успешно принята! В кассу поступило: ${amount.toLocaleString('ru-RU')} сум`
+      message: `Касса успешно принята! В кассу поступило: ${amount.toLocaleString('ru-RU')} сум. Z-отчет отправлен руководителю в Telegram!`,
+      net_cash: amount,
+      orders_count: Number(orders_count) || 0,
+      total_delivered: totalDelivered
     });
   } catch (err) {
     console.error('Error accepting courier shift:', err);
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+app.post('/api/finance/courier-shift/accept', handleCourierShiftAccept);
+app.post('/api/courier/submit-shift', handleCourierShiftAccept);
 
 app.get('/api/finance/courier-shifts', async (req, res) => {
   const rows = await db.all('SELECT * FROM courier_shifts ORDER BY id DESC LIMIT 50');
