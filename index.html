@@ -1209,6 +1209,12 @@
           <span id="notif-badge" class="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-bold flex items-center justify-center hidden">0</span>
         </button>
 
+        <!-- Android Telephony Gateway Test Button -->
+        <button onclick="simulateIncomingCallTest()" id="btn-telephony-test" class="relative p-1.5 sm:py-1.5 sm:px-2.5 rounded-xl bg-[#072632] hover:bg-[#0A3542] border border-[#0E4352] text-[#00E5FF] hover:text-white transition shadow-inner flex items-center gap-1.5 shrink-0 cursor-pointer" title="Шлюз телефонии Android (клик для теста входящего звонка)">
+          <i data-lucide="phone-call" class="w-4 h-4 text-[#00E5FF]"></i>
+          <span class="hidden xl:inline text-[11px] font-bold">Тест звонка</span>
+        </button>
+
         <!-- Red Logout Button -->
         <button onclick="logout()" class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 hover:text-rose-300 border border-rose-500/30 transition shadow-inner flex items-center justify-center cursor-pointer active:scale-95 shrink-0" title="Выйти из аккаунта">
           <i data-lucide="log-out" class="w-4 h-4"></i>
@@ -4181,6 +4187,107 @@
         <button type="button" id="nav-modal-gps-phone-btn" class="flex-1 py-2 px-3 bg-white border border-emerald-deep/20 text-emerald-deep rounded-xl font-bold hover:bg-butter transition flex items-center justify-center gap-1">
           <i data-lucide="crosshair" class="w-3.5 h-3.5"></i>
           <span>Зафиксировать GPS</span>
+        </button>
+      </div>
+    </div>
+  <!-- 7.5.9. MODAL: ANDROID TELEPHONY INCOMING CALL ALERT & QUICK ORDER -->
+  <div id="modal-incoming-call" class="hidden fixed inset-0 bg-black/75 backdrop-blur-md z-[80] flex items-center justify-center p-3 sm:p-4">
+    <div class="theme-card bg-white border-2 border-emerald-500 rounded-3xl p-5 sm:p-6 max-w-lg w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
+      <!-- Header with Pulsing Live Call Animation -->
+      <div class="flex items-center justify-between border-b border-emerald-deep/15 pb-3">
+        <div class="flex items-center gap-3">
+          <div class="relative flex items-center justify-center w-12 h-12 rounded-2xl bg-emerald-500 text-white shadow-lg shadow-emerald-500/30">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-2xl bg-emerald-400 opacity-60"></span>
+            <i data-lucide="phone-incoming" class="w-6 h-6 relative z-10"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase tracking-wide">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                Входящий звонок
+              </span>
+              <span class="text-[10px] text-charcoal-muted font-mono" id="incoming-call-time">LIVE</span>
+            </div>
+            <h3 class="font-serif text-lg font-bold text-emerald-deep mt-0.5">Шлюз Android Телефонии</h3>
+          </div>
+        </div>
+        <button type="button" onclick="dismissIncomingCall()" class="w-8 h-8 rounded-full bg-black/5 hover:bg-black/10 flex items-center justify-center text-charcoal-muted hover:text-emerald-deep transition text-lg font-bold" title="Закрыть">
+          ✕
+        </button>
+      </div>
+
+      <!-- Caller Phone Display -->
+      <div class="bg-emerald-50/80 border border-emerald-200/80 rounded-2xl p-4 text-center space-y-1">
+        <div class="text-[11px] font-bold text-emerald-800/70 uppercase tracking-wider">Номер вызывающего абонента</div>
+        <div class="flex items-center justify-center gap-2">
+          <span id="incoming-call-phone" class="font-mono text-2xl sm:text-3xl font-extrabold text-emerald-deep tracking-tight">+998 90 000-00-00</span>
+          <button type="button" onclick="copyIncomingCallPhone()" class="p-1.5 rounded-lg text-emerald-700 hover:bg-emerald-100 transition" title="Скопировать номер">
+            <i data-lucide="copy" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Client Dossier / Card -->
+      <div id="incoming-call-client-box" class="p-3.5 rounded-2xl border border-emerald-deep/15 bg-white space-y-2.5 text-xs">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-charcoal-muted">Клиент:</span>
+            <span id="incoming-call-client-name" class="font-bold text-emerald-deep text-sm">Новый клиент</span>
+          </div>
+          <span id="incoming-call-tier-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
+            🆕 Новый клиент
+          </span>
+        </div>
+
+        <div class="text-charcoal-muted flex items-start gap-1.5">
+          <i data-lucide="map-pin" class="w-4 h-4 text-emerald-deep shrink-0 mt-0.5"></i>
+          <div>
+            <span class="font-bold">Адрес: </span>
+            <span id="incoming-call-client-address" class="text-charcoal-deep font-semibold">Адрес не указан</span>
+            <span id="incoming-call-district-badge" class="ml-1 text-[10px] font-semibold text-emerald-700"></span>
+          </div>
+        </div>
+
+        <div id="incoming-call-order-stats-box" class="grid grid-cols-2 gap-2 pt-1 border-t border-emerald-deep/10 text-[11px]">
+          <div>
+            <span class="text-charcoal-muted">Всего заказов: </span>
+            <b id="incoming-call-total-orders" class="text-emerald-deep font-mono">0</b>
+          </div>
+          <div>
+            <span class="text-charcoal-muted">Сумма заказов: </span>
+            <b id="incoming-call-total-spent" class="text-emerald-deep font-mono">0 сум</b>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Ongoing Order Notice (if client has an order in process) -->
+      <div id="incoming-call-active-order-box" class="hidden p-3 rounded-2xl bg-amber-50 border border-amber-300 text-xs space-y-1.5">
+        <div class="flex items-center justify-between">
+          <span class="font-bold text-amber-900 flex items-center gap-1.5">
+            <i data-lucide="package" class="w-4 h-4 text-amber-700"></i>
+            <span>У клиента есть активный заказ!</span>
+          </span>
+          <span id="incoming-call-active-order-stage" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900">
+            Стирка
+          </span>
+        </div>
+        <div class="flex items-center justify-between text-[11px] text-amber-950">
+          <span>Номер: <b id="incoming-call-active-order-id" class="font-mono">#BRK-0000</b></span>
+          <span>Курьер: <b id="incoming-call-active-order-courier">Не назначен</b></span>
+        </div>
+        <button type="button" onclick="openIncomingCallActiveOrder()" class="w-full mt-1 py-1.5 px-3 bg-amber-200 hover:bg-amber-300 text-amber-950 rounded-xl font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-2xs">
+          <span>👁 Открыть текущий заказ</span>
+        </button>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="space-y-2 pt-1">
+        <button type="button" onclick="acceptIncomingCallAndCreateOrder()" class="w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold text-sm shadow-lg shadow-emerald-600/25 hover:shadow-emerald-600/40 transition flex items-center justify-center gap-2 cursor-pointer active:scale-98">
+          <i data-lucide="plus-circle" class="w-4 h-4"></i>
+          <span>Принять & Оформить заказ</span>
+        </button>
+        <button type="button" onclick="dismissIncomingCall()" class="w-full py-2.5 px-4 bg-black/5 hover:bg-black/10 text-charcoal-muted hover:text-emerald-deep rounded-2xl font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer">
+          <span>✕ Скрыть уведомление</span>
         </button>
       </div>
     </div>

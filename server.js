@@ -1983,7 +1983,232 @@ app.delete('/api/orders/:id/photos/:photoId', async (req, res) => {
   }
 });
 
-// 5. Звонки и телефония
+// 5. Звонки и телефония (Android Telephony Gateway)
+let latestIncomingCall = null;
+let incomingCallTimer = null;
+let recentTelephonyCalls = [];
+
+async function handleIncomingTelephonyCall(rawPhone, source = 'android', extraName = '') {
+  const cleanDigits = String(rawPhone || '').replace(/\D/g, '');
+  const last9 = cleanDigits.slice(-9);
+  let formattedPhone = String(rawPhone || '').trim();
+  if (cleanDigits.length === 9) {
+    formattedPhone = `+998 ${cleanDigits.slice(0, 2)} ${cleanDigits.slice(2, 5)}-${cleanDigits.slice(5, 7)}-${cleanDigits.slice(7, 9)}`;
+  } else if (cleanDigits.length === 12 && cleanDigits.startsWith('998')) {
+    formattedPhone = `+998 ${cleanDigits.slice(3, 5)} ${cleanDigits.slice(5, 8)}-${cleanDigits.slice(8, 10)}-${cleanDigits.slice(10, 12)}`;
+  }
+
+  let client = null;
+  let activeOrder = null;
+  let totalOrdersCount = 0;
+  let totalSpentSum = 0;
+
+  if (last9 && last9.length >= 7) {
+    try {
+      // 1. Поиск в таблице clients
+      client = await db.get(`
+        SELECT * FROM clients 
+        WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')') LIKE ? 
+        ORDER BY total_orders DESC LIMIT 1
+      `, [`%${last9}`]);
+
+      // 2. Статистика по заказам
+      const orderStats = await db.get(`
+        SELECT COUNT(*) as cnt, COALESCE(SUM(total_price), 0) as spent 
+        FROM orders 
+        WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(client_phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')') LIKE ?
+      `, [`%${last9}`]);
+
+      totalOrdersCount = (orderStats?.cnt) || (client?.total_orders) || 0;
+      totalSpentSum = (orderStats?.spent) || (client?.total_spent) || 0;
+
+      // 3. Активный текущий заказ в работе
+      activeOrder = await db.get(`
+        SELECT id, stage, total_price, client_name, client_address, courier_name, created_at, paid, paid_amount 
+        FROM orders 
+        WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(client_phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')') LIKE ? 
+          AND stage NOT IN ('delivered', 'cancelled')
+        ORDER BY created_at DESC LIMIT 1
+      `, [`%${last9}`]);
+
+      // 4. Если в clients нет, но есть история в orders
+      if (!client) {
+        const prevOrder = await db.get(`
+          SELECT client_name, client_phone, client_address, district, landmark, language 
+          FROM orders 
+          WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(client_phone, ' ', ''), '-', ''), '+', ''), '(', ''), ')') LIKE ? 
+          ORDER BY created_at DESC LIMIT 1
+        `, [`%${last9}`]);
+
+        if (prevOrder) {
+          client = {
+            name: prevOrder.client_name,
+            phone: prevOrder.client_phone,
+            address: prevOrder.client_address,
+            district: prevOrder.district || 'Сиёб',
+            landmark: prevOrder.landmark || '',
+            language: prevOrder.language || 'Русский',
+            total_orders: totalOrdersCount,
+            total_spent: totalSpentSum,
+            tier: totalOrdersCount >= 5 ? 'VIP' : (totalOrdersCount >= 2 ? 'Постоянный' : 'Standard'),
+            is_from_orders: true
+          };
+        }
+      }
+    } catch (dbErr) {
+      console.warn('Telephony client lookup warning:', dbErr.message);
+    }
+  }
+
+  // Если передан extraName и клиента нет в базе
+  if (!client && extraName) {
+    client = {
+      name: extraName,
+      phone: formattedPhone,
+      address: '',
+      district: 'Сиёб',
+      landmark: '',
+      language: 'Русский',
+      total_orders: 0,
+      total_spent: 0,
+      tier: 'Новый'
+    };
+  }
+
+  // Запись в call_logs
+  try {
+    await db.run(`
+      INSERT INTO call_logs (order_id, client_phone, client_name, caller_name, caller_role, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [
+      activeOrder?.id || null,
+      formattedPhone,
+      client?.name || 'Новый клиент',
+      `Android Gateway (${source})`,
+      'telephony',
+      new Date().toISOString()
+    ]);
+  } catch (e) {
+    console.warn('Telephony call_log insert notice:', e.message);
+  }
+
+  const callId = `call_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  latestIncomingCall = {
+    id: callId,
+    phone: rawPhone,
+    formattedPhone,
+    cleanDigits,
+    last9,
+    isExisting: !!client,
+    client: client ? {
+      name: client.name,
+      phone: client.phone || formattedPhone,
+      address: client.address || '',
+      district: client.district || '',
+      landmark: client.landmark || '',
+      total_orders: totalOrdersCount,
+      total_spent: totalSpentSum,
+      tier: client.tier || (totalOrdersCount >= 5 ? 'VIP' : (totalOrdersCount >= 2 ? 'Постоянный' : 'Standard')),
+      notes: client.notes || ''
+    } : null,
+    activeOrder: activeOrder ? {
+      id: activeOrder.id,
+      stage: activeOrder.stage,
+      total_price: activeOrder.total_price || 0,
+      paid: activeOrder.paid || 0,
+      paid_amount: activeOrder.paid_amount || 0,
+      courier_name: activeOrder.courier_name || 'Не назначен',
+      created_at: activeOrder.created_at
+    } : null,
+    timestamp: Date.now(),
+    source
+  };
+
+  recentTelephonyCalls.unshift({ ...latestIncomingCall });
+  if (recentTelephonyCalls.length > 20) recentTelephonyCalls.pop();
+
+  if (incomingCallTimer) clearTimeout(incomingCallTimer);
+  incomingCallTimer = setTimeout(() => {
+    if (latestIncomingCall && latestIncomingCall.id === callId) {
+      latestIncomingCall = null;
+    }
+  }, 45000);
+
+  // Оповещение в Telegram
+  try {
+    const stageNamesRu = {
+      pickup: 'Забор у клиента',
+      sorting: 'Сортировка/Измерение',
+      washing: 'Стирка в цеху',
+      drying: 'Сушка/Оверлок',
+      packaging: 'Упаковка/Готов',
+      delivery: 'Доставка клиенту'
+    };
+
+    const clientBadge = client
+      ? `⭐ <b>Клиент:</b> ${client.name}\n📊 Заказов: <b>${totalOrdersCount}</b> | Сумма: <b>${Number(totalSpentSum).toLocaleString()} сум</b>\n📍 Адрес: <code>${client.address || 'Не указан'}</code>`
+      : `🆕 <b>Новый клиент</b> (впервые звонит)`;
+
+    const activeOrderBadge = activeOrder
+      ? `\n📦 <b>Активный заказ:</b> #${activeOrder.id} [${stageNamesRu[activeOrder.stage] || activeOrder.stage}]`
+      : '';
+
+    const tgAlert = `📞 <b>ВХОДЯЩИЙ ЗВОНОК НА ТЕЛЕФОН!</b>\n` +
+      `Номер: <code>${formattedPhone}</code>\n` +
+      `${clientBadge}${activeOrderBadge}\n` +
+      `⚡ <i>Откройте CRM: окно быстрого заказа уже активно!</i>`;
+
+    sendTelegramNotification(tgAlert).catch(e => console.warn('TG call notify warning:', e.message));
+  } catch (tgErr) {
+    console.warn('Telegram telephony notification error:', tgErr.message);
+  }
+
+  return latestIncomingCall;
+}
+
+// Android Webhook: Входящий вызов
+app.post('/api/telephony/incoming', async (req, res) => {
+  try {
+    const rawPhone = (req.body?.phone || req.body?.number || req.body?.caller_number || req.body?.from || req.query?.phone || req.query?.number || '').toString().trim();
+    if (!rawPhone) {
+      return res.status(400).json({ error: 'Номер телефона обязателен (параметр phone или number)' });
+    }
+    const source = req.body?.source || req.query?.source || 'android';
+    const extraName = req.body?.name || req.query?.name || '';
+    const callData = await handleIncomingTelephonyCall(rawPhone, source, extraName);
+    res.json({ success: true, call: callData });
+  } catch (err) {
+    console.error('Telephony incoming error:', err);
+    res.status(500).json({ error: 'Ошибка обработки звонка: ' + err.message });
+  }
+});
+
+// Текущий активный входящий звонок (для поллинга в UI)
+app.get('/api/telephony/active', (req, res) => {
+  res.json({
+    activeCall: latestIncomingCall,
+    recentCalls: recentTelephonyCalls.slice(0, 5)
+  });
+});
+
+// Скрыть / отклонить звонок
+app.post('/api/telephony/dismiss', (req, res) => {
+  latestIncomingCall = null;
+  res.json({ success: true });
+});
+
+// Симуляция звонка для тестирования UI
+app.post('/api/telephony/simulate', async (req, res) => {
+  try {
+    const testPhone = req.body?.phone || '+998901234567';
+    const testName = req.body?.name || 'Шерзод (Тестовый звонок)';
+    const callData = await handleIncomingTelephonyCall(testPhone, 'simulation', testName);
+    res.json({ success: true, call: callData, message: 'Тестовый звонок успешно запущен' });
+  } catch (err) {
+    res.status(500).json({ error: 'Ошибка симуляции: ' + err.message });
+  }
+});
+
 app.post('/api/calls', async (req, res) => {
   const { order_id, client_phone, client_name, caller_name, caller_role } = req.body;
   if (!client_phone) return res.status(400).json({ error: 'Номер телефона обязателен' });

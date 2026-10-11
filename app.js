@@ -668,6 +668,9 @@ let liveSyncInterval = null;
 
 async function silentSyncOrders() {
   if (!currentUser) return;
+  if (typeof pollIncomingTelephonyCall === 'function') {
+    pollIncomingTelephonyCall();
+  }
   if (typeof document !== 'undefined' && document.hidden) return;
   try {
     const res = await fetch('/api/orders');
@@ -2889,6 +2892,229 @@ async function openCallHistoryModal(orderId, clientPhone, clientName) {
   }
 
   if (window.lucide) lucide.createIcons();
+}
+
+// ================= ANDROID TELEPHONY GATEWAY CLIENT LOGIC =================
+let lastCheckedIncomingCallId = null;
+let currentActiveTelephonyCall = null;
+
+function playIncomingCallChime() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+
+    const playTone = (freq, start, duration, gainVal = 0.2) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, start);
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(gainVal, start + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + duration);
+    };
+
+    playTone(880, now, 0.22, 0.25);
+    playTone(1108, now + 0.14, 0.25, 0.25);
+    playTone(1318, now + 0.30, 0.40, 0.3);
+  } catch (e) {
+    console.warn('Audio chime notice:', e.message);
+  }
+}
+
+async function pollIncomingTelephonyCall() {
+  try {
+    const res = await fetch('/api/telephony/active');
+    if (!res.ok) return;
+    const data = await res.json();
+    const activeCall = data?.activeCall;
+
+    if (activeCall && activeCall.id) {
+      if (activeCall.id !== lastCheckedIncomingCallId) {
+        lastCheckedIncomingCallId = activeCall.id;
+        currentActiveTelephonyCall = activeCall;
+        showIncomingCallModal(activeCall);
+        playIncomingCallChime();
+      }
+    } else {
+      currentActiveTelephonyCall = null;
+    }
+  } catch (err) {
+    // Silent catch on background poll
+  }
+}
+
+function showIncomingCallModal(call) {
+  const modal = document.getElementById('modal-incoming-call');
+  if (!modal) return;
+
+  const phoneEl = document.getElementById('incoming-call-phone');
+  if (phoneEl) phoneEl.textContent = call.formattedPhone || call.phone || 'Неизвестный номер';
+
+  const clientNameEl = document.getElementById('incoming-call-client-name');
+  const tierBadgeEl = document.getElementById('incoming-call-tier-badge');
+  const addressEl = document.getElementById('incoming-call-client-address');
+  const districtEl = document.getElementById('incoming-call-district-badge');
+  const totalOrdersEl = document.getElementById('incoming-call-total-orders');
+  const totalSpentEl = document.getElementById('incoming-call-total-spent');
+
+  if (call.client) {
+    if (clientNameEl) clientNameEl.textContent = call.client.name || 'Постоянный клиент';
+    if (tierBadgeEl) {
+      tierBadgeEl.className = 'px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200';
+      tierBadgeEl.textContent = `⭐ ${call.client.tier || 'Клиент'} (${call.client.total_orders || 0} зак.)`;
+    }
+    if (addressEl) addressEl.textContent = call.client.address || 'Адрес не указан';
+    if (districtEl) districtEl.textContent = call.client.district ? `(${call.client.district})` : '';
+    if (totalOrdersEl) totalOrdersEl.textContent = String(call.client.total_orders || 0);
+    if (totalSpentEl) totalSpentEl.textContent = `${Number(call.client.total_spent || 0).toLocaleString()} сум`;
+  } else {
+    if (clientNameEl) clientNameEl.textContent = 'Новый клиент (номер не найден)';
+    if (tierBadgeEl) {
+      tierBadgeEl.className = 'px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200';
+      tierBadgeEl.textContent = '🆕 Новый клиент';
+    }
+    if (addressEl) addressEl.textContent = 'Адрес не указан (будет зафиксирован)';
+    if (districtEl) districtEl.textContent = '';
+    if (totalOrdersEl) totalOrdersEl.textContent = '0';
+    if (totalSpentEl) totalSpentEl.textContent = '0 сум';
+  }
+
+  // Active Ongoing Order
+  const activeOrderBox = document.getElementById('incoming-call-active-order-box');
+  if (activeOrderBox) {
+    if (call.activeOrder) {
+      activeOrderBox.classList.remove('hidden');
+      const orderIdEl = document.getElementById('incoming-call-active-order-id');
+      const stageEl = document.getElementById('incoming-call-active-order-stage');
+      const courierEl = document.getElementById('incoming-call-active-order-courier');
+
+      const stageLabels = {
+        pickup: 'Забор у клиента',
+        sorting: 'Сортировка',
+        washing: 'Стирка в цеху',
+        drying: 'Сушка/Оверлок',
+        packaging: 'Упаковка/Готов',
+        delivery: 'Доставка клиенту'
+      };
+
+      if (orderIdEl) orderIdEl.textContent = `#${call.activeOrder.id}`;
+      if (stageEl) stageEl.textContent = stageLabels[call.activeOrder.stage] || call.activeOrder.stage;
+      if (courierEl) courierEl.textContent = call.activeOrder.courier_name || 'Не назначен';
+    } else {
+      activeOrderBox.classList.add('hidden');
+    }
+  }
+
+  modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeIncomingCallModal() {
+  const modal = document.getElementById('modal-incoming-call');
+  if (!modal) return;
+  modal.classList.add('hidden');
+}
+
+async function dismissIncomingCall() {
+  closeIncomingCallModal();
+  try {
+    await fetch('/api/telephony/dismiss', { method: 'POST' });
+  } catch (e) {}
+}
+
+async function acceptIncomingCallAndCreateOrder() {
+  const call = currentActiveTelephonyCall;
+  await dismissIncomingCall();
+
+  if (typeof openNewOrderModal === 'function') {
+    openNewOrderModal();
+  }
+
+  if (call) {
+    const rawDigits = call.cleanDigits || String(call.phone || '').replace(/\D/g, '');
+    let ph = call.formattedPhone || call.phone || '';
+    if (rawDigits.length === 9) ph = '+998' + rawDigits;
+    else if (rawDigits.length === 12 && rawDigits.startsWith('998')) ph = '+' + rawDigits;
+
+    const phoneInput = document.getElementById('order-client-phone');
+    if (phoneInput && ph) phoneInput.value = ph;
+
+    if (call.client) {
+      const nameInput = document.getElementById('order-client-name');
+      if (nameInput && call.client.name) nameInput.value = call.client.name;
+
+      const addrInput = document.getElementById('order-client-address');
+      if (addrInput && call.client.address) addrInput.value = call.client.address;
+
+      const distInput = document.getElementById('order-district');
+      if (distInput && call.client.district) distInput.value = call.client.district;
+
+      const landInput = document.getElementById('order-landmark');
+      if (landInput && call.client.landmark) landInput.value = call.client.landmark;
+
+      const langInput = document.getElementById('order-language');
+      if (langInput && call.client.language) langInput.value = call.client.language;
+    }
+
+    if (typeof showToast === 'function') {
+      showToast(`📞 Данные звонка ${ph} подставлены в форму заказа!`, 'success');
+    }
+  }
+}
+
+function openIncomingCallActiveOrder() {
+  const call = currentActiveTelephonyCall;
+  if (call && call.activeOrder && call.activeOrder.id) {
+    dismissIncomingCall();
+    if (typeof openOrderModal === 'function') {
+      openOrderModal(call.activeOrder.id);
+    } else if (typeof openCourierOrderInfoModal === 'function') {
+      openCourierOrderInfoModal(call.activeOrder.id);
+    }
+  }
+}
+
+function copyIncomingCallPhone() {
+  const phoneEl = document.getElementById('incoming-call-phone');
+  if (phoneEl && phoneEl.textContent) {
+    navigator.clipboard?.writeText(phoneEl.textContent.trim());
+    if (typeof showToast === 'function') {
+      showToast('Номер телефона скопирован в буфер', 'success');
+    }
+  }
+}
+
+async function simulateIncomingCallTest() {
+  try {
+    if (typeof showToast === 'function') {
+      showToast('Тестирование входящего звонка Android...', 'info');
+    }
+    const res = await fetch('/api/telephony/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: '+998 90 777-88-99',
+        name: 'Тестовый звонок (Шлюз телефонии)'
+      })
+    });
+    const data = await res.json();
+    if (data.success && data.call) {
+      lastCheckedIncomingCallId = null; // force popup
+      currentActiveTelephonyCall = data.call;
+      showIncomingCallModal(data.call);
+      playIncomingCallChime();
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast('Ошибка симуляции звонка: ' + e.message, 'error');
+    }
+  }
 }
 
 function initLocationPickerMap(lat, lng) {
@@ -9802,5 +10028,11 @@ window.reloadModalShiftData = reloadModalShiftData;
 window.recalcModalShiftNetCash = recalcModalShiftNetCash;
 window.submitCourierShiftFromModal = submitCourierShiftFromModal;
 window.printModalZReport = printModalZReport;
+window.dismissIncomingCall = dismissIncomingCall;
+window.acceptIncomingCallAndCreateOrder = acceptIncomingCallAndCreateOrder;
+window.openIncomingCallActiveOrder = openIncomingCallActiveOrder;
+window.copyIncomingCallPhone = copyIncomingCallPhone;
+window.simulateIncomingCallTest = simulateIncomingCallTest;
+window.pollIncomingTelephonyCall = pollIncomingTelephonyCall;
 
 
