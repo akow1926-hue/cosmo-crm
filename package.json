@@ -19,9 +19,7 @@
   "type": "commonjs",
   "dependencies": {
     "@capacitor/android": "^8.5.2",
-    "@capacitor/app": "^8.1.1",
     "@capacitor/core": "^8.5.2",
-    "@capacitor/geolocation": "^8.2.2",
     "@capacitor/ios": "^8.5.3",
     "@libsql/client": "^0.18.0",
     "cors": "^2.8.6",

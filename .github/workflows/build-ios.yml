@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-ipa:
     runs-on: macos-14
@@ -50,3 +53,13 @@ jobs:
           name: CosmoCRM-iOS-IPA
           path: build/CosmoCRM.ipa
           retention-days: 14
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: ios-build
+          name: "Cosmo CRM iOS IPA"
+          files: build/CosmoCRM.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
