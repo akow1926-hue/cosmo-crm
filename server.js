@@ -977,13 +977,30 @@ function normalizeStage(stage) {
   return str;
 }
 
-function expandOrderItemsBackend(rawCarpets) {
-  if (!rawCarpets) return [];
+function expandOrderItemsBackend(rawCarpets, orderNotes = '') {
+  if (!rawCarpets && !orderNotes) return [];
   let list = rawCarpets;
   if (typeof rawCarpets === 'string') {
     try { list = JSON.parse(rawCarpets); } catch(e) { list = []; }
   }
-  if (!Array.isArray(list)) return [];
+  if (!Array.isArray(list)) list = [];
+
+  let notesQty = 1;
+  if (orderNotes && typeof orderNotes === 'string') {
+    const m = orderNotes.match(/(?:ковров|стирка ковров|количество|изделий|шт)[:\s]*(\d+)/i) 
+           || orderNotes.match(/(\d+)\s*(?:шт|штук|ковр|ковер|ковра|gilam|дона|dona)/i);
+    if (m && m[1]) {
+      const parsed = parseInt(m[1], 10);
+      if (parsed > 1 && parsed < 100) notesQty = parsed;
+    }
+  }
+
+  if (list.length === 0 && notesQty > 1) {
+    list = [{ name: 'Ковер (Стандарт)', count: notesQty, qty: notesQty, unit: 'м²', price: 14000 }];
+  } else if (list.length === 1 && notesQty > 1 && (parseInt(list[0].qty || list[0].count, 10) || 1) === 1 && !Number(list[0].length) && !Number(list[0].width)) {
+    list[0].qty = notesQty;
+    list[0].count = notesQty;
+  }
 
   const expanded = [];
   list.forEach((item, idx) => {
@@ -992,11 +1009,10 @@ function expandOrderItemsBackend(rawCarpets) {
     const unit = String(item.unit || (item.type === 'textile' ? 'шт' : 'м²')).toLowerCase();
     const isPiece = unit === 'шт' || unit === 'штук' || unit === 'dona';
     const isMeter = unit === 'метр' || unit === 'м' || unit === 'пог.м';
-    const hasDimensions = (Number(item.length) > 0 && Number(item.width) > 0) || (isMeter && Number(item.length) > 0);
     const rawName = String(item.name || '').trim();
     const baseName = rawName ? rawName.split(' (')[0].replace(/\s*#\d+$/, '').trim() : (isMeter ? 'Курпача' : (isPiece ? 'Одеяло' : 'Ковер'));
 
-    if (count > 1 && !hasDimensions) {
+    if (count > 1) {
       for (let i = 0; i < count; i++) {
         expanded.push({
           ...item,
@@ -1007,8 +1023,8 @@ function expandOrderItemsBackend(rawCarpets) {
           price: Number(item.price) || (isPiece ? 70000 : (isMeter ? 15000 : 14000)),
           length: Number(item.length) || (unit === 'м²' ? 3.0 : (isMeter ? 2.0 : 0)),
           width: Number(item.width) || (unit === 'м²' ? 2.0 : 0),
-          area: Number(item.area) || 0,
-          total: Number(item.total) || 0,
+          area: Number(item.area) ? +(Number(item.area) / count).toFixed(2) : 0,
+          total: Number(item.total) ? Math.round(Number(item.total) / count) : 0,
           defects: item.defects || item.note || ''
         });
       }
@@ -1018,8 +1034,12 @@ function expandOrderItemsBackend(rawCarpets) {
         name: rawName || `${baseName} #${idx + 1}`,
         unit: item.unit || (isPiece ? 'шт' : (isMeter ? 'метр' : 'м²')),
         price: Number(item.price) || (isPiece ? 70000 : (isMeter ? 15000 : 14000)),
-        qty: count,
-        count: count,
+        qty: 1,
+        count: 1,
+        length: Number(item.length) || (unit === 'м²' ? 3.0 : (isMeter ? 2.0 : 0)),
+        width: Number(item.width) || (unit === 'м²' ? 2.0 : 0),
+        area: Number(item.area) || 0,
+        total: Number(item.total) || 0,
         defects: item.defects || item.note || ''
       });
     }
@@ -1083,8 +1103,16 @@ let isSyncingFromSheets = false;
 const sheetsSyncQueue = [];
 let isProcessingSheetsQueue = false;
 
-function enqueueSheetsSync(order, action = 'upsert') {
+async function enqueueSheetsSync(order, action = 'upsert') {
   if (!order || !order.id) return;
+  if (isVercel) {
+    try {
+      await syncOrderToGoogleSheets(order, action);
+    } catch (e) {
+      console.warn('[Vercel Sheets Sync] notice:', e.message);
+    }
+    return;
+  }
   const targetId = String(order.id).trim();
   const idx = sheetsSyncQueue.findIndex(item => String(item.order.id).trim() === targetId);
   if (idx !== -1) {
@@ -1181,7 +1209,9 @@ async function syncOrdersFromGoogleSheets(force = false) {
           `, [clientName, clientPhone, clientAddress, district, courierName, washerName, deliveryDate, notes, id]);
         }
       } else {
-        const carpetsJson = JSON.stringify([{ name: 'Ковер', area: totalM2, price: 14000, total: totalPrice }]);
+        const baseItems = [{ name: 'Ковер', area: totalM2, price: 14000, total: totalPrice }];
+        const expandedFromNotes = expandOrderItemsBackend(baseItems, notes);
+        const carpetsJson = JSON.stringify(expandedFromNotes.length > 0 ? expandedFromNotes : baseItems);
         await db.run(`
           INSERT INTO orders (
             id, client_name, client_phone, client_address, district, stage,
@@ -1391,7 +1421,7 @@ app.get('/api/orders/public-track/:id', async (req, res) => {
 
   let carpets = [];
   try { carpets = JSON.parse(row.carpets_json || '[]'); } catch (e) { carpets = []; }
-  carpets = expandOrderItemsBackend(carpets);
+  carpets = expandOrderItemsBackend(carpets, row.notes);
 
   // Безопасная проекция данных без внутренних заметок и с маскированным телефоном
   const maskedPhone = row.client_phone 
@@ -1475,7 +1505,7 @@ app.get('/api/orders', requireAuth(), async (req, res) => {
   const parsed = rows.map(r => {
     let carpets = [];
     try { carpets = JSON.parse(r.carpets_json || '[]'); } catch (e) { carpets = []; }
-    carpets = expandOrderItemsBackend(carpets);
+    carpets = expandOrderItemsBackend(carpets, r.notes);
     let extras = [];
     try { extras = JSON.parse(r.extras_json || '[]'); } catch (e) { extras = []; }
     let rawPhotos = [];
@@ -1520,6 +1550,7 @@ app.get('/api/orders/:id', async (req, res) => {
 
   let carpets = [];
   try { carpets = JSON.parse(row.carpets_json || '[]'); } catch (e) { carpets = []; }
+  carpets = expandOrderItemsBackend(carpets, row.notes);
   let extras = [];
   try { extras = JSON.parse(row.extras_json || '[]'); } catch (e) { extras = []; }
   let photos = [];
@@ -1599,14 +1630,15 @@ app.post('/api/orders/public-request', async (req, res) => {
     const itemsCount = Math.max(1, parseInt(carpets_count, 10) || 1);
     const estM2 = Math.max(0, parseFloat(estimated_m2) || 0);
     const estPrice = Math.max(0, parseInt(estimated_price, 10) || 0);
-    const initialCarpets = [{
+    const initialCarpets = expandOrderItemsBackend([{
       name: service_type || 'Стирка ковров (онлайн-заявка)',
       qty: itemsCount,
-      unit: 'шт',
+      count: itemsCount,
+      unit: 'м²',
       area: estM2,
       price: estPrice > 0 ? Math.round(estPrice / itemsCount) : 14000,
       total: estPrice
-    }];
+    }]);
 
     const todayRu = new Date().toLocaleDateString('ru-RU');
     const fullNotes = `[Сайт] ${service_type || 'Стирка ковров'}: ${itemsCount} шт. ${notes ? '• ' + notes : ''}`.trim();
@@ -1652,7 +1684,7 @@ app.post('/api/orders/public-request', async (req, res) => {
         (notes ? `💬 *Примечание:* ${notes}\n` : '') +
         `\n🚚 [Открыть заказ в CRM](http://localhost:3000/#track-${orderId})`;
 
-      enqueueSheetsSync(createdOrder, 'upsert');
+      await enqueueSheetsSync(createdOrder, 'upsert');
       setImmediate(() => {
         sendTelegramNotification(alertTg).catch(e => console.warn('TG alert error:', e.message));
       });
@@ -1710,7 +1742,8 @@ app.post('/api/orders', requireAuth(), async (req, res) => {
       }
     }
 
-    const items = Array.isArray(carpets) && carpets.length > 0 ? expandOrderItemsBackend(carpets) : [
+    const rawItems = Array.isArray(carpets) && carpets.length > 0 ? expandOrderItemsBackend(carpets, notes) : expandOrderItemsBackend([], notes);
+    const items = rawItems.length > 0 ? rawItems : [
       { name: 'Gilam Standart', unit: 'м²', qty: 1, price: 14000, total: 0 }
     ];
 
@@ -1823,7 +1856,7 @@ app.post('/api/orders', requireAuth(), async (req, res) => {
     // Автоматические уведомления (Telegram + SMS + Google Таблицы через очередь без задержки)
     const createdOrder = await db.get('SELECT * FROM orders WHERE id = ?', [orderId]);
     if (createdOrder) {
-      enqueueSheetsSync(createdOrder, 'upsert');
+      await enqueueSheetsSync(createdOrder, 'upsert');
       const smsMsg = formatSmsMessage('created', createdOrder, sanitizedItems, totalM2, totalPrice);
       setImmediate(() => {
         sendTelegramNotification(formatTelegramOrderCard(createdOrder)).catch(e => console.warn('TG auto notify err:', e.message));
@@ -1995,7 +2028,7 @@ app.put('/api/orders/:id', requireAuth(), async (req, res) => {
 
     const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [currentId]);
     if (updatedOrder) {
-      enqueueSheetsSync(updatedOrder, 'upsert');
+      await enqueueSheetsSync(updatedOrder, 'upsert');
     }
 
     res.json({ success: true, id: currentId });
@@ -2018,10 +2051,10 @@ app.patch('/api/orders/:id/stage', requireAuth(), async (req, res) => {
     let totalPrice = existingOrder.total_price;
 
     if (Array.isArray(carpets) && carpets.length > 0) {
-      const expandedCarpets = expandOrderItemsBackend(carpets);
+      const expandedCarpets = expandOrderItemsBackend(carpets, newNotes);
       carpetsJson = JSON.stringify(expandedCarpets);
-      totalM2 = carpets.reduce((sum, it) => sum + (Number(it.area) || ((Number(it.length) || 0) * (Number(it.width) || 0)) || 0), 0);
-      const calcPrice = carpets.reduce((sum, it) => sum + (Number(it.total) || Number(it.price) || 0), 0);
+      totalM2 = expandedCarpets.reduce((sum, it) => sum + (Number(it.area) || ((Number(it.length) || 0) * (Number(it.width) || 0)) || 0), 0);
+      const calcPrice = expandedCarpets.reduce((sum, it) => sum + (Number(it.total) || 0), 0);
       if (calcPrice > 0) totalPrice = calcPrice;
     }
 
@@ -2091,7 +2124,7 @@ app.patch('/api/orders/:id/stage', requireAuth(), async (req, res) => {
     }
 
     if (updatedOrder) {
-      enqueueSheetsSync(updatedOrder, 'upsert');
+      await enqueueSheetsSync(updatedOrder, 'upsert');
     }
 
     if (bgTasks.length > 0) {
@@ -2132,7 +2165,7 @@ app.patch('/api/orders/:id/assign-courier', requireAuth(), async (req, res) => {
 
     const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
     if (updatedOrder) {
-      enqueueSheetsSync(updatedOrder, 'upsert');
+      await enqueueSheetsSync(updatedOrder, 'upsert');
     }
     res.json({ success: true, order: updatedOrder, courier_name: cleanedCourier });
   } catch (err) {
@@ -2169,7 +2202,7 @@ app.patch('/api/orders/:id/location', requireAuth(), async (req, res) => {
 
     const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
     if (updatedOrder) {
-      enqueueSheetsSync(updatedOrder, 'upsert');
+      await enqueueSheetsSync(updatedOrder, 'upsert');
     }
 
     res.json({ success: true, order: updatedOrder });
@@ -2337,7 +2370,7 @@ app.patch('/api/orders/:id/measurements', requireAuth(), async (req, res) => {
 
     const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
     if (updatedOrder) {
-      enqueueSheetsSync(updatedOrder, 'upsert');
+      await enqueueSheetsSync(updatedOrder, 'upsert');
     }
 
     if (bgTasks.length > 0) {
@@ -2415,7 +2448,7 @@ app.patch('/api/orders/:id/delivery-complete', requireAuth(), async (req, res) =
 
     const updatedOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
     if (updatedOrder) {
-      enqueueSheetsSync(updatedOrder, 'upsert');
+      await enqueueSheetsSync(updatedOrder, 'upsert');
     }
 
     if (bgTasks.length > 0) {
@@ -2439,7 +2472,7 @@ app.delete('/api/orders/:id', requireAuth(), async (req, res) => {
     WHERE id = ?
   `, [deletedAt, deleted_by || 'Администратор', reason || 'Удален пользователем', id]);
 
-  enqueueSheetsSync({ id, delete_reason: reason || 'Удален пользователем' }, 'delete');
+  await enqueueSheetsSync({ id, delete_reason: reason || 'Удален пользователем' }, 'delete');
 
   res.json({ success: true, id, changes: result.changes });
 });
@@ -2449,7 +2482,7 @@ app.post('/api/orders/:id/restore', requireAuth(), async (req, res) => {
   await db.run('UPDATE orders SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, delete_reason = NULL WHERE id = ?', [id]);
   const restoredOrder = await db.get('SELECT * FROM orders WHERE id = ?', [id]);
   if (restoredOrder) {
-    enqueueSheetsSync(restoredOrder, 'upsert');
+    await enqueueSheetsSync(restoredOrder, 'upsert');
   }
   res.json({ success: true });
 });

@@ -665,6 +665,10 @@ async function launchApp() {
 
 async function loadInitialData() {
   try {
+    if (!activeOrders || activeOrders.length === 0) {
+      activeOrders = getCachedOrders();
+    }
+
     const [ordersRes, clientsRes, servicesRes, staffRes, callsRes] = await Promise.all([
       fetch('/api/orders'),
       fetch('/api/clients'),
@@ -673,8 +677,13 @@ async function loadInitialData() {
       fetch('/api/calls').catch(() => null)
     ]);
 
-    activeOrders = (ordersRes && ordersRes.ok) ? (await ordersRes.json().catch(() => [])) : (activeOrders || []);
-    if (!Array.isArray(activeOrders)) activeOrders = [];
+    const freshOrders = (ordersRes && ordersRes.ok) ? (await ordersRes.json().catch(() => [])) : [];
+    if (Array.isArray(freshOrders) && freshOrders.length > 0) {
+      activeOrders = mergeOrdersNonDestructive(activeOrders, freshOrders);
+      saveOrdersToLocalCache(activeOrders);
+    } else if (activeOrders.length === 0) {
+      activeOrders = getCachedOrders();
+    }
     allClients = (clientsRes && clientsRes.ok) ? (await clientsRes.json().catch(() => [])) : (allClients || []);
     if (!Array.isArray(allClients)) allClients = [];
     allServices = (servicesRes && servicesRes.ok) ? (await servicesRes.json().catch(() => [])) : (allServices || []);
@@ -719,7 +728,29 @@ async function loadInitialData() {
   }
 }
 
-// ================= LIVE ORDER BACKGROUND SYNC & POLLING =================
+// ================= LIVE ORDER BACKGROUND SYNC & PERSISTENT CACHING =================
+
+const CRM_CACHE_KEY = 'crm_active_orders_cache_' + (window.CRM_BRAND || 'cosmo');
+
+function getCachedOrders() {
+  try {
+    const raw = localStorage.getItem(CRM_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {}
+  return [];
+}
+
+function saveOrdersToLocalCache(orders) {
+  try {
+    const list = orders || activeOrders;
+    if (Array.isArray(list)) {
+      localStorage.setItem(CRM_CACHE_KEY, JSON.stringify(list));
+    }
+  } catch (e) {}
+}
 
 // Глобальная карта недавних локальных изменений (45-секундный grace-период)
 // Предотвращает откат карточек назад при фоновом опросе multi-lambda Vercel или задержках Google Sheets
@@ -741,6 +772,54 @@ function recordNewLocalOrder(order) {
     order: { ...order },
     timestamp: Date.now()
   });
+}
+
+function mergeOrdersNonDestructive(currentList, incomingList, now = Date.now()) {
+  if (!Array.isArray(incomingList)) return Array.isArray(currentList) ? currentList : [];
+  if (!Array.isArray(currentList)) currentList = [];
+
+  const incomingMap = new Map();
+  incomingList.forEach(item => {
+    if (item && item.id) incomingMap.set(String(item.id), item);
+  });
+
+  // 1. Обновляем существующие заказы свежими данными от сервера (никогда не удаляем молча!)
+  const updatedExisting = currentList.map(existing => {
+    const fresh = incomingMap.get(String(existing.id));
+    if (fresh) {
+      if (fresh.is_deleted) return null; // Заказ явно удален в корзину
+      const mut = recentLocalOrderMutations.get(String(existing.id));
+      if (mut && (now - mut.timestamp <= 45000)) {
+        return { ...existing, ...fresh, ...mut.patch };
+      }
+      return { ...existing, ...fresh };
+    }
+    // Заказ не пришел в текущем ответе сервера:
+    // СТРОГО НЕ УДАЛЯТЬ! Защита от потери заказов при опросе разных lambda-контейнеров Vercel!
+    return existing;
+  }).filter(Boolean);
+
+  // 2. Добавляем новые заказы, которых у клиента еще не было
+  incomingList.forEach(item => {
+    if (item && item.id && !item.is_deleted) {
+      const alreadyExists = updatedExisting.some(o => String(o.id) === String(item.id));
+      if (!alreadyExists) {
+        const mut = recentLocalOrderMutations.get(String(item.id));
+        const orderToAdd = (mut && (now - mut.timestamp <= 45000)) ? { ...item, ...mut.patch } : item;
+        updatedExisting.unshift(orderToAdd);
+      }
+    }
+  });
+
+  // 3. Сохраняем локально созданные заказы в течение 60 секунд
+  for (const [pId, pData] of pendingLocalOrders.entries()) {
+    const alreadyExists = updatedExisting.some(o => String(o.id) === String(pId));
+    if (!alreadyExists && (now - pData.timestamp <= 60000)) {
+      updatedExisting.unshift(pData.order);
+    }
+  }
+
+  return updatedExisting;
 }
 
 async function silentSyncOrders() {
@@ -769,36 +848,24 @@ async function silentSyncOrders() {
       }
     }
 
-    // Применяем активные локальные мутации, чтобы избежать эффекта "прыжка назад"
-    let mergedOrders = freshOrders.map(fo => {
-      const mut = recentLocalOrderMutations.get(String(fo.id));
-      if (mut && (now - mut.timestamp <= 45000)) {
-        return { ...fo, ...mut.patch };
-      }
-      return fo;
-    });
+    // Неразрушающее слияние заказов
+    const mergedOrders = mergeOrdersNonDestructive(activeOrders, freshOrders, now);
 
-    // Сохраняем локально созданные заказы, которые сервер еще не успел вернуть из-за задержки
-    for (const [pId, pData] of pendingLocalOrders.entries()) {
-      const existsOnServer = mergedOrders.some(o => String(o.id) === String(pId));
-      if (!existsOnServer && (now - pData.timestamp <= 60000)) {
-        mergedOrders.unshift(pData.order);
-      }
-    }
-
-    // Если сервер неожиданно вернул пустой массив, но у нас уже были заказы — не затираем!
+    // Если список пуст, но ранее были заказы — не затираем
     if (mergedOrders.length === 0 && activeOrders.length > 0) {
       return;
     }
 
-    // Check if anything changed in active orders
+    // Проверяем, изменился ли фингерпринт данных
     const getOrderFingerprint = o => `${o.id}_${o.stage}_${o.courier_name}_${o.paid}_${o.paid_amount}_${o.total_price}_${o.client_address}_${o.notes}_${(o.photos || []).length}_${o.total_m2}`;
     const currentFingerprint = activeOrders.map(getOrderFingerprint).join('|');
     const freshFingerprint = mergedOrders.map(getOrderFingerprint).join('|');
 
-    if (currentFingerprint !== freshFingerprint) {
+    if (currentFingerprint !== freshFingerprint || activeOrders.length !== mergedOrders.length) {
       activeOrders = mergedOrders;
-      // Do not interrupt user if any modal is currently open
+      saveOrdersToLocalCache(activeOrders);
+
+      // Не прерываем пользователя, если открыто модальное окно
       const anyModalOpen = document.querySelector('[id^="modal-"]:not(.hidden)');
       if (!anyModalOpen) {
         if (currentViewRole === 'courier' || currentUser.role === 'courier') {
@@ -824,7 +891,7 @@ async function silentSyncOrders() {
 
 function startLiveOrderSync() {
   if (liveSyncInterval) clearInterval(liveSyncInterval);
-  liveSyncInterval = setInterval(silentSyncOrders, 4000);
+  liveSyncInterval = setInterval(silentSyncOrders, 8000);
 }
 
 async function manualRefreshData() {
@@ -1388,9 +1455,11 @@ function renderOrdersTable(filteredList = null) {
           <button onclick="openCourierDeliveryModal('${o.id}')" title="Вручение клиенту и расчет" class="p-1 text-amber-700 hover:bg-amber-100 rounded font-bold mr-0.5">
             💰
           </button>
-          <button onclick="printOrderReceipt('${o.id}')" title="Печать чека 80мм" class="p-1 text-charcoal-muted hover:text-emerald-deep rounded hover:bg-emerald-deep/10">
-            🖨️
-          </button>
+          ${(currentUser && ['admin', 'dispatcher'].includes(currentUser.role)) ? `
+            <button onclick="printOrderReceipt('${o.id}')" title="🖨️ Чек 80мм" class="p-1 text-charcoal-muted hover:text-emerald-deep rounded hover:bg-emerald-deep/10">
+              🖨️
+            </button>
+          ` : ''}
           <button onclick="showQrForOrderId('${o.id}')" title="QR для клиента" class="p-1 text-charcoal-muted hover:text-emerald-deep rounded hover:bg-emerald-deep/10">
             📱
           </button>
@@ -4066,13 +4135,31 @@ function resolveItemServiceMeta(preset = {}) {
   return { displayName, unit, price, matched };
 }
 
-function expandOrderItems(rawCarpets) {
-  if (!rawCarpets) return [];
+function expandOrderItems(rawCarpets, orderNotes = '') {
+  if (!rawCarpets && !orderNotes) return [];
   let list = rawCarpets;
   if (typeof rawCarpets === 'string') {
     try { list = JSON.parse(rawCarpets); } catch (e) { list = []; }
   }
-  if (!Array.isArray(list)) return [];
+  if (!Array.isArray(list)) list = [];
+
+  // Извлечение количества из примечания, если в списке только 1 обобщенная позиция
+  let notesQty = 1;
+  if (orderNotes && typeof orderNotes === 'string') {
+    const m = orderNotes.match(/(?:ковров|стирка ковров|количество|изделий|шт)[:\s]*(\d+)/i) 
+           || orderNotes.match(/(\d+)\s*(?:шт|штук|ковр|ковер|ковра|gilam|дона|dona)/i);
+    if (m && m[1]) {
+      const parsed = parseInt(m[1], 10);
+      if (parsed > 1 && parsed < 100) notesQty = parsed;
+    }
+  }
+
+  if (list.length === 0 && notesQty > 1) {
+    list = [{ name: 'Ковер (Стандарт)', count: notesQty, qty: notesQty, unit: 'м²', price: 14000 }];
+  } else if (list.length === 1 && notesQty > 1 && (parseInt(list[0].qty || list[0].count, 10) || 1) === 1 && !Number(list[0].length) && !Number(list[0].width)) {
+    list[0].qty = notesQty;
+    list[0].count = notesQty;
+  }
 
   const expanded = [];
   list.forEach((item, idx) => {
@@ -4082,23 +4169,22 @@ function expandOrderItems(rawCarpets) {
     const unit = String(item.unit || meta.unit || 'м²').toLowerCase();
     const isPiece = unit === 'шт' || unit === 'штук' || unit === 'dona';
     const isMeter = unit === 'метр' || unit === 'м' || unit === 'пог.м';
-    const hasDimensions = (Number(item.length) > 0 && Number(item.width) > 0) || (isMeter && Number(item.length) > 0);
     const rawName = String(item.name || '').trim();
     const baseName = rawName ? rawName.split(' (')[0].replace(/\s*#\d+$/, '').trim() : meta.displayName;
 
-    if (count > 1 && !hasDimensions) {
+    if (count > 1) {
       for (let i = 0; i < count; i++) {
         expanded.push({
           ...item,
           name: `${baseName} #${i + 1}`,
-          unit: item.unit || meta.unit,
+          unit: item.unit || meta.unit || (isPiece ? 'шт' : (isMeter ? 'метр' : 'м²')),
           qty: 1,
           count: 1,
-          price: item.price || meta.price,
+          price: Number(item.price) || meta.price || (isPiece ? 70000 : (isMeter ? 15000 : 14000)),
           length: Number(item.length) || (unit === 'м²' ? 3.0 : (isMeter ? 2.0 : 0)),
           width: Number(item.width) || (unit === 'м²' ? 2.0 : 0),
-          area: Number(item.area) || 0,
-          total: Number(item.total) || 0,
+          area: Number(item.area) ? +(Number(item.area) / count).toFixed(2) : 0,
+          total: Number(item.total) ? Math.round(Number(item.total) / count) : 0,
           defects: item.defects || item.note || ''
         });
       }
@@ -4106,10 +4192,14 @@ function expandOrderItems(rawCarpets) {
       expanded.push({
         ...item,
         name: rawName || `${baseName} #${idx + 1}`,
-        unit: item.unit || meta.unit,
-        price: item.price || meta.price,
-        qty: count,
-        count: count,
+        unit: item.unit || meta.unit || (isPiece ? 'шт' : (isMeter ? 'метр' : 'м²')),
+        price: Number(item.price) || meta.price || (isPiece ? 70000 : (isMeter ? 15000 : 14000)),
+        qty: 1,
+        count: 1,
+        length: Number(item.length) || (unit === 'м²' ? 3.0 : (isMeter ? 2.0 : 0)),
+        width: Number(item.width) || (unit === 'м²' ? 2.0 : 0),
+        area: Number(item.area) || 0,
+        total: Number(item.total) || 0,
         defects: item.defects || item.note || ''
       });
     }
@@ -4225,6 +4315,14 @@ async function submitCourierPickupForm(e) {
     });
 
     if (res.ok) {
+      const mutPatch = { stage: 'in_shop', courier_name: courierName, delivery_date, notes: combinedNotes, carpets: items, ...(finalGpsToSave ? { gps_location: finalGpsToSave } : {}) };
+      recordOrderMutation(orderId, mutPatch);
+      const exIdx = activeOrders.findIndex(o => String(o.id) === String(orderId));
+      if (exIdx !== -1) {
+        activeOrders[exIdx] = { ...activeOrders[exIdx], ...mutPatch };
+        saveOrdersToLocalCache(activeOrders);
+      }
+
       // Обновляем локальные данные заказа и клиента
       if (activePickupModalOrder && hasExactGps) {
         activePickupModalOrder.gps_location = gps_location;
@@ -6042,6 +6140,19 @@ async function handleOrderFormSubmit(e) {
     }
 
     if (res.ok) {
+      const resData = await res.json().catch(() => ({}));
+      const orderIdFinal = id || custom_id || resData.orderId || resData.id;
+      const orderObj = { id: orderIdFinal, ...payload, stage: payload.stage || 'pickup' };
+      if (id) {
+        recordOrderMutation(id, payload);
+        const exIdx = activeOrders.findIndex(o => String(o.id) === String(id));
+        if (exIdx !== -1) activeOrders[exIdx] = { ...activeOrders[exIdx], ...payload };
+      } else {
+        recordNewLocalOrder(orderObj);
+        activeOrders.unshift(orderObj);
+      }
+      saveOrdersToLocalCache(activeOrders);
+
       closeModal('modal-order');
       await loadInitialData();
       renderOrdersTable();
@@ -6077,6 +6188,9 @@ async function deleteOrderToTrash(orderId) {
   // 2. МГНОВЕННОЕ УДАЛЕНИЕ ИЗ UI (0 мс задержки)
   if (deletedIndex !== -1) {
     activeOrders.splice(deletedIndex, 1);
+    pendingLocalOrders.delete(String(orderId));
+    recentLocalOrderMutations.delete(String(orderId));
+    saveOrdersToLocalCache(activeOrders);
   }
 
   // Сразу перерисовываем все связанные представления
@@ -7171,13 +7285,8 @@ function renderWasherPortal() {
   let totalCarpets = 0;
   let totalM2 = 0;
   allInWorkshop.forEach(o => {
-    let carpets = [];
-    if (Array.isArray(o.carpets)) carpets = o.carpets;
-    else if (typeof o.carpets === 'string') {
-      try { carpets = JSON.parse(o.carpets); } catch (e) { carpets = []; }
-    }
-    const count = carpets.reduce((sum, it) => sum + (parseInt(it.qty || it.count, 10) || 1), 0) || (carpets.length > 0 ? carpets.length : 1);
-    totalCarpets += count;
+    const carpets = expandOrderItems(o.carpets, o.notes);
+    totalCarpets += carpets.length > 0 ? carpets.length : 1;
     totalM2 += (o.total_m2 || 0);
   });
 
@@ -7259,7 +7368,7 @@ function renderWasherPortalCards() {
 
   try {
     container.innerHTML = targetList.map((order) => {
-      const carpets = expandOrderItems(order.carpets);
+      const carpets = expandOrderItems(order.carpets, order.notes);
       const carpetsCount = carpets.length > 0 ? carpets.length : 1;
       const orderNeedsMeasure = !order.total_m2 || order.total_m2 === 0;
       const washerPhotosCount = (order.photos && Array.isArray(order.photos)) ? order.photos.length : 0;
@@ -7448,6 +7557,14 @@ function renderWasherPortalCards() {
 
 async function advanceWasherStage(orderId, newStage) {
   try {
+    recordOrderMutation(orderId, { stage: newStage });
+    const exIdx = activeOrders.findIndex(o => String(o.id) === String(orderId));
+    if (exIdx !== -1) {
+      activeOrders[exIdx].stage = newStage;
+      saveOrdersToLocalCache(activeOrders);
+      renderWasherPortal();
+    }
+
     const res = await fetch(`/api/orders/${orderId}/stage`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -7613,7 +7730,7 @@ async function openMeasureModalForOrder(orderId, autoAddNew = false) {
   const container = document.getElementById('measure-items-list');
   container.innerHTML = '';
 
-  const expandedItems = expandOrderItems(order.carpets);
+  const expandedItems = expandOrderItems(order.carpets, order.notes);
 
   if (expandedItems.length === 0 && !autoAddNew) {
     const defaultSvc = (allServices && allServices[0]) || { name: 'Gilam Standart', unit: 'м²', price: 14000 };
@@ -8059,6 +8176,26 @@ async function saveMeasurements(targetStage = 'ready') {
     });
     const data = await res.json();
     if (res.ok && data.success) {
+      recordOrderMutation(orderId, {
+        carpets,
+        stage: targetStage,
+        courier_name: courierName || undefined,
+        washer_name: (currentUser && currentUser.name) ? currentUser.name : 'Мастер цеха',
+        total_m2: data.total_m2,
+        total_price: data.total_price
+      });
+      const exIdx = activeOrders.findIndex(o => String(o.id) === String(orderId));
+      if (exIdx !== -1) {
+        activeOrders[exIdx] = {
+          ...activeOrders[exIdx],
+          carpets,
+          stage: targetStage,
+          ...(courierName ? { courier_name: courierName } : {}),
+          total_m2: data.total_m2 || activeOrders[exIdx].total_m2,
+          total_price: data.total_price || activeOrders[exIdx].total_price
+        };
+        saveOrdersToLocalCache(activeOrders);
+      }
       closeModal('modal-measure');
       await loadInitialData();
       if (currentEditingOrder && String(currentEditingOrder.id) === String(orderId)) {
@@ -8084,7 +8221,60 @@ async function saveMeasurements(targetStage = 'ready') {
   }
 }
 
-// ================= THERMAL RECEIPT (80MM) & QR MODAL =================
+// ================= THERMAL RECEIPT (80MM) & PURE VECTOR SVG QR ENGINE =================
+
+function getOrderQrSvg(text, size = 110) {
+  try {
+    if (typeof QRCode !== 'undefined') {
+      const tempDiv = document.createElement('div');
+      tempDiv.style.position = 'fixed';
+      tempDiv.style.right = '0';
+      tempDiv.style.bottom = '0';
+      tempDiv.style.width = size + 'px';
+      tempDiv.style.height = size + 'px';
+      tempDiv.style.visibility = 'hidden';
+      document.body.appendChild(tempDiv);
+
+      const qr = new QRCode(tempDiv, {
+        text: text,
+        width: size,
+        height: size,
+        correctLevel: (QRCode.CorrectLevel && QRCode.CorrectLevel.M) || 0
+      });
+
+      let svgHtml = '';
+      if (qr && qr._oQRCode) {
+        const count = qr._oQRCode.getModuleCount();
+        const margin = 2;
+        const totalSize = count + margin * 2;
+        let pathData = '';
+        for (let r = 0; r < count; r++) {
+          for (let c = 0; c < count; c++) {
+            if (qr._oQRCode.isDark(r, c)) {
+              pathData += `M${c + margin},${r + margin}h1v1h-1z `;
+            }
+          }
+        }
+        svgHtml = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${totalSize} ${totalSize}" shape-rendering="crispEdges" style="display:block;margin:6px auto;background:#ffffff;">
+          <rect width="100%" height="100%" fill="#ffffff"/>
+          <path d="${pathData.trim()}" fill="#000000"/>
+        </svg>`;
+      } else {
+        const canvas = tempDiv.querySelector('canvas');
+        if (canvas) {
+          const dataUrl = canvas.toDataURL('image/png');
+          svgHtml = `<img src="${dataUrl}" width="${size}" height="${size}" style="display:block;margin:6px auto;image-rendering:pixelated;" />`;
+        }
+      }
+
+      try { document.body.removeChild(tempDiv); } catch (e) {}
+      if (svgHtml) return svgHtml;
+    }
+  } catch (err) {
+    console.warn('QR SVG render notice:', err);
+  }
+  return `<img src="https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(text)}&margin=1" width="${size}" height="${size}" style="display:block;margin:6px auto;image-rendering:pixelated;" onerror="this.outerHTML='<div style=\\'font-size:9px;font-weight:900;border:2.5px solid #000;padding:6px;margin:6px auto;width:60mm;text-align:center;word-break:break-all;\\'>${escapeHtml(text)}</div>'" />`;
+}
 
 function printReceiptForCurrentOrder() {
   if (currentEditingOrder) printOrderReceipt(currentEditingOrder.id);
@@ -8094,7 +8284,7 @@ function printOrderReceipt(orderId) {
   // Печать товарного чека доступна исключительно Администратору и Диспетчеру
   const role = currentUser?.role;
   if (!role || !['admin', 'dispatcher'].includes(role)) {
-    alert('Печать товарного чека доступна исключительно Администратору и Диспетчеру.');
+    alert('Печать чека доступна исключительно Администратору и Диспетчеру.');
     return;
   }
 
@@ -8109,35 +8299,19 @@ function printOrderReceipt(orderId) {
   const paidSum = order.paid ? totalSum : (Number(order.paid_amount) || 0);
   const remaining = Math.max(0, totalSum - paidSum);
 
-  const items = expandOrderItems(order.carpets);
+  const items = expandOrderItems(order.carpets, order.notes);
   if (!Array.isArray(items) || items.length === 0) {
     items.push({ name: 'Ковер (Стандарт)', length: 3.0, width: 2.0, area: order.total_m2 || 6.0, price: 14000, total: totalSum || 84000 });
   }
 
-  const companyName = (window.currentCompanySettings && window.currentCompanySettings.company_name) || 'COSMO CLEANING';
+  const companyName = (window.currentCompanySettings && window.currentCompanySettings.company_name) || (window.CRM_BRAND === 'barokot' ? 'BAROKOT' : 'COSMO CLEANING');
   const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 20 002 20 99';
   const courierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
   const courierDisplay = order.courier_name ? `${escapeHtml(order.courier_name)} (${courierPhone})` : 'Не назначен';
   const formattedDate = formatOrderDate(order.created_at || order.pickup_date || new Date().toISOString());
 
   const trackUrl = `${window.location.origin}/#track-${order.id}`;
-  let qrImgTag = '';
-  try {
-    const tempDiv = document.createElement('div');
-    if (typeof QRCode !== 'undefined') {
-      new QRCode(tempDiv, { text: trackUrl, width: 80, height: 80 });
-      const img = tempDiv.querySelector('img') || tempDiv.querySelector('canvas');
-      if (img) {
-        const src = img.tagName.toLowerCase() === 'canvas' ? img.toDataURL() : img.src;
-        qrImgTag = `<img src="${src}" width="80" height="80" style="display: block; margin: 4px auto;" />`;
-      }
-    }
-  } catch (e) {
-    console.warn('QR render notice:', e);
-  }
-  if (!qrImgTag) {
-    qrImgTag = `<div style="font-size: 9px; font-weight: bold; border: 1px dashed #000; padding: 4px; margin: 4px auto; width: 60mm; text-align: center;">${trackUrl}</div>`;
-  }
+  const qrSvgMarkup = getOrderQrSvg(trackUrl, 110);
 
   const receiptHtml = `
     <!DOCTYPE html>
@@ -8147,36 +8321,51 @@ function printOrderReceipt(orderId) {
       <title>Чек #${escapeHtml(order.id)}</title>
       <style>
         @page { size: 80mm auto; margin: 0; }
-        * { box-sizing: border-box; }
+        * {
+          box-sizing: border-box;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+          color: #000000 !important;
+          -webkit-text-fill-color: #000000 !important;
+          text-shadow: none !important;
+          -webkit-font-smoothing: none !important;
+          -moz-osx-font-smoothing: grayscale !important;
+          text-rendering: geometricPrecision !important;
+        }
         body {
           margin: 0;
-          padding: 4mm 3mm;
-          background: #ffffff;
-          color: #000000;
-          font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
+          padding: 3mm 2mm;
+          background: #ffffff !important;
+          color: #000000 !important;
+          font-family: 'Arial Black', Arial, 'Segoe UI Bold', Helvetica, sans-serif !important;
           font-size: 11px;
           line-height: 1.35;
           width: 76mm;
-          -webkit-print-color-adjust: exact;
-          print-color-adjust: exact;
         }
-        .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px; }
-        .brand-title { font-size: 20px; font-weight: 900; letter-spacing: 1.5px; }
-        .brand-sub { font-size: 10px; font-weight: 800; margin-top: 1px; }
-        .brand-tel { font-size: 9px; margin-top: 2px; }
-        .doc-title { display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-bottom: 4px; }
-        .doc-date { font-size: 10px; margin-bottom: 6px; }
-        .info-box { border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 5px 0; margin-bottom: 8px; font-size: 10px; }
-        .items-title { font-weight: 900; font-size: 10px; margin-bottom: 4px; text-transform: uppercase; }
-        table { width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 8px; }
-        th { border-bottom: 1.5px solid #000; padding: 3px 0; }
-        td { padding: 4px 0; border-bottom: 1px dotted #888; }
-        .totals-box { border-top: 2px solid #000; padding-top: 5px; font-size: 11px; }
-        .total-row { display: flex; justify-content: space-between; margin-bottom: 2px; }
-        .total-final { display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-top: 4px; border-top: 1px dashed #000; padding-top: 3px; }
-        .sign-box { margin-top: 10px; padding-top: 6px; border-top: 1px dashed #000; font-size: 9px; display: flex; justify-content: space-between; }
-        .qr-box { text-align: center; margin-top: 8px; padding-top: 6px; border-top: 1px dashed #000; }
-        .footer { font-size: 8px; text-align: center; margin-top: 8px; color: #333; border-top: 1px solid #000; padding-top: 4px; }
+        .header { text-align: center; border-bottom: 3px solid #000000; padding-bottom: 6px; margin-bottom: 8px; }
+        .brand-title { font-size: 22px; font-weight: 900; letter-spacing: 1.5px; }
+        .brand-sub { font-size: 10px; font-weight: 900; margin-top: 2px; text-transform: uppercase; }
+        .brand-tel { font-size: 12px; font-weight: 900; margin-top: 3px; }
+        .doc-title { display: flex; justify-content: space-between; font-weight: 900; font-size: 15px; margin-bottom: 4px; }
+        .doc-date { font-size: 11px; font-weight: 900; margin-bottom: 6px; }
+        .info-box { border-top: 2.5px solid #000000; border-bottom: 2.5px solid #000000; padding: 6px 0; margin-bottom: 8px; font-size: 11.5px; font-weight: 800; line-height: 1.45; }
+        .items-title { font-weight: 900; font-size: 12px; margin-bottom: 4px; text-transform: uppercase; }
+        table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-bottom: 8px; }
+        th { border-bottom: 2.5px solid #000000; padding: 4px 0; font-weight: 900; font-size: 11px; }
+        td { padding: 5px 0; border-bottom: 1.5px solid #000000; font-weight: 800; }
+        .totals-box { border-top: 3px solid #000000; padding-top: 6px; font-size: 12px; font-weight: 900; }
+        .total-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+        .total-final { display: flex; justify-content: space-between; font-weight: 900; font-size: 17px; margin-top: 6px; border-top: 3px solid #000000; border-bottom: 3px solid #000000; padding: 5px 0; }
+        .sign-box { margin-top: 12px; padding-top: 8px; border-top: 2px solid #000000; font-size: 10.5px; font-weight: 900; display: flex; justify-content: space-between; }
+        .qr-box { text-align: center; margin-top: 10px; padding-top: 8px; border-top: 2.5px solid #000000; }
+        .qr-title { font-size: 12px; font-weight: 900; margin-bottom: 4px; }
+        .qr-sub { font-size: 9.5px; font-weight: 900; margin-top: 4px; }
+        .footer { font-size: 9.5px; font-weight: 900; text-align: center; margin-top: 10px; border-top: 2px solid #000000; padding-top: 6px; }
+        @media print {
+          html, body { width: 76mm !important; margin: 0 !important; padding: 2mm 1mm !important; background: #ffffff !important; color: #000000 !important; }
+          * { color: #000000 !important; -webkit-text-fill-color: #000000 !important; text-shadow: none !important; }
+          svg { shape-rendering: crispEdges !important; }
+        }
       </style>
     </head>
     <body>
@@ -8245,12 +8434,12 @@ function printOrderReceipt(orderId) {
             return `
             <tr>
               <td>
-                <b>#${idx + 1}. ${escapeHtml(it.name || 'Ковер')}</b>
-                ${dims ? `<div style="font-size: 9px; color: #333;">${dims}${priceRate}</div>` : (priceRate ? `<div style="font-size: 9px; color: #333;">Тариф:${priceRate}</div>` : '')}
-                ${it.defects ? `<div style="font-size: 8px; color: #c00; font-style: italic;">Дефекты: ${escapeHtml(it.defects)}</div>` : ''}
+                <b style="font-size: 12.5px;">#${idx + 1}. ${escapeHtml(it.name || 'Ковер')}</b>
+                ${dims ? `<div style="font-size: 10.5px; font-weight: 800;">${dims}${priceRate}</div>` : (priceRate ? `<div style="font-size: 10.5px; font-weight: 800;">Тариф:${priceRate}</div>` : '')}
+                ${it.defects ? `<div style="font-size: 9.5px; font-weight: 900; text-decoration: underline;">Дефекты: ${escapeHtml(it.defects)}</div>` : ''}
               </td>
-              <td style="text-align: center; font-weight: bold;">${sizeDisplay}</td>
-              <td style="text-align: right; font-weight: bold;">${sumDisplay} сум</td>
+              <td style="text-align: center; font-weight: 900;">${sizeDisplay}</td>
+              <td style="text-align: right; font-weight: 900;">${sumDisplay} сум</td>
             </tr>
           `;
           }).join('')}
@@ -8264,7 +8453,7 @@ function printOrderReceipt(orderId) {
         </div>
         <div class="total-row">
           <span>Внесено / Оплачено:</span>
-          <span>${paidSum.toLocaleString()} сум</span>
+          <span><b>${paidSum.toLocaleString()} сум</b></span>
         </div>
         <div class="total-final">
           <span>ИТОГО К ОПЛАТЕ:</span>
@@ -8278,30 +8467,41 @@ function printOrderReceipt(orderId) {
       </div>
 
       <div class="qr-box">
-        <div style="font-size: 9px; font-weight: bold;">ОНЛАЙН ТРЕКИНГ ЗАКАЗА:</div>
-        ${qrImgTag}
-        <div style="font-size: 8px;">Наведите камеру смартфона для проверки статуса</div>
+        <div class="qr-title">ОНЛАЙН ТРЕКИНГ ЗАКАЗА:</div>
+        ${qrSvgMarkup}
+        <div class="qr-sub">Наведите камеру смартфона для проверки статуса</div>
       </div>
 
       <div class="footer">
         Спасибо за доверие! Стирка на турецком оборудовании, сушка в термокамере и антибактериальная обработка.
       </div>
+      <script>
+        window.onload = function() {
+          setTimeout(function() {
+            try { window.focus(); window.print(); } catch (e) {}
+          }, 200);
+        };
+      <\/script>
     </body>
     </html>
   `;
 
-  let printFrame = document.getElementById('receipt-print-iframe');
-  if (!printFrame) {
-    printFrame = document.createElement('iframe');
-    printFrame.id = 'receipt-print-iframe';
-    printFrame.style.position = 'fixed';
-    printFrame.style.right = '0';
-    printFrame.style.bottom = '0';
-    printFrame.style.width = '0';
-    printFrame.style.height = '0';
-    printFrame.style.border = '0';
-    document.body.appendChild(printFrame);
+  const oldFrame = document.getElementById('receipt-print-iframe');
+  if (oldFrame) {
+    try { oldFrame.remove(); } catch (e) {}
   }
+
+  const printFrame = document.createElement('iframe');
+  printFrame.id = 'receipt-print-iframe';
+  printFrame.style.position = 'fixed';
+  printFrame.style.right = '0';
+  printFrame.style.bottom = '0';
+  printFrame.style.width = '1px';
+  printFrame.style.height = '1px';
+  printFrame.style.opacity = '0.01';
+  printFrame.style.pointerEvents = 'none';
+  printFrame.style.border = 'none';
+  document.body.appendChild(printFrame);
 
   const frameDoc = printFrame.contentWindow.document;
   frameDoc.open();
@@ -8314,9 +8514,19 @@ function printOrderReceipt(orderId) {
       printFrame.contentWindow.print();
     } catch (e) {
       console.warn('iframe print fallback:', e);
-      window.print();
+      try {
+        const popup = window.open('', '_blank', 'width=420,height=650');
+        if (popup) {
+          popup.document.write(receiptHtml);
+          popup.document.close();
+          popup.focus();
+          popup.print();
+        }
+      } catch (err) {
+        window.print();
+      }
     }
-  }, 250);
+  }, 350);
 }
 
 function showQrForCurrentOrder() {
@@ -8325,21 +8535,17 @@ function showQrForCurrentOrder() {
 
 function showQrForOrderId(orderId) {
   const container = document.getElementById('qr-code-canvas-container');
-  container.innerHTML = '';
+  if (!container) return;
   const trackUrl = `${window.location.origin}/#track-${orderId}`;
+  container.innerHTML = getOrderQrSvg(trackUrl, 180);
 
-  if (typeof QRCode !== 'undefined') {
-    new QRCode(container, {
-      text: trackUrl,
-      width: 180,
-      height: 180,
-      colorDark: '#013E37',
-      colorLight: '#ffffff'
-    });
+  const linkEl = document.getElementById('qr-code-link');
+  if (linkEl) {
+    linkEl.href = trackUrl;
+    linkEl.textContent = trackUrl;
   }
-
-  document.getElementById('qr-tracking-url-text').textContent = trackUrl;
-  document.getElementById('modal-qr').classList.remove('hidden');
+  const modal = document.getElementById('modal-qr');
+  if (modal) modal.classList.remove('hidden');
 }
 
 function copyQrTrackingUrl() {
@@ -8982,9 +9188,11 @@ function renderArchive() {
         </td>
         <td class="py-3 px-4 text-right whitespace-nowrap">
           <div class="flex items-center justify-end gap-1">
-            <button type="button" onclick="printOrderReceipt('${o.id}')" class="p-1.5 rounded-lg bg-emerald-deep/5 hover:bg-emerald-deep/15 text-emerald-deep transition" title="Печать квитанции 80мм">
-              <i data-lucide="printer" class="w-3.5 h-3.5"></i>
-            </button>
+            ${(currentUser && ['admin', 'dispatcher'].includes(currentUser.role)) ? `
+              <button type="button" onclick="printOrderReceipt('${o.id}')" class="p-1.5 rounded-lg bg-emerald-deep/5 hover:bg-emerald-deep/15 text-emerald-deep transition" title="🖨️ Чек 80мм">
+                <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+              </button>
+            ` : ''}
             <button type="button" onclick="showQrForOrderId('${o.id}')" class="p-1.5 rounded-lg bg-emerald-deep/5 hover:bg-emerald-deep/15 text-emerald-deep transition" title="QR код трекинга">
               <i data-lucide="qr-code" class="w-3.5 h-3.5"></i>
             </button>
