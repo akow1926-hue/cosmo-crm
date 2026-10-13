@@ -1,5 +1,63 @@
 // ================= BAROKOT CRM 2.0 ENTERPRISE APP SCRIPT =================
 
+// ================= GLOBAL AUTHENTICATED FETCH INTERCEPTOR =================
+(function() {
+  const originalFetch = window.fetch;
+  window.fetch = function(url, options = {}) {
+    let sentToken = null;
+    try {
+      const token = localStorage.getItem('barokot_token');
+      if (token && token !== 'undefined' && token !== 'null' && typeof url === 'string' && url.startsWith('/api/') && !url.startsWith('/api/auth/pin') && !url.startsWith('/api/orders/public-track/')) {
+        sentToken = token;
+        options = options || {};
+        options.headers = options.headers || {};
+        if (options.headers instanceof Headers) {
+          if (!options.headers.has('Authorization')) {
+            options.headers.set('Authorization', 'Bearer ' + token);
+          }
+        } else if (Array.isArray(options.headers)) {
+          options.headers.push(['Authorization', 'Bearer ' + token]);
+        } else {
+          if (!options.headers['Authorization']) {
+            options.headers['Authorization'] = 'Bearer ' + token;
+          }
+        }
+      }
+    } catch (e) {}
+
+    return originalFetch.call(this, url, options).then(res => {
+      if (res.status === 401 && typeof url === 'string' && url.startsWith('/api/') && !url.startsWith('/api/auth/pin') && !url.startsWith('/api/orders/public-track/')) {
+        // Защита от race condition: если пользователь только что вошел (< 3 сек назад), игнорируем остаточные 401 от старых запросов
+        const loginTime = parseInt(localStorage.getItem('barokot_login_time') || '0', 10);
+        if (Date.now() - loginTime < 3000) {
+          console.warn('Ignoring transient 401 during initial login grace period on', url);
+          return res;
+        }
+
+        // Если в localStorage токен уже обновился по сравнению с тем, что был отправлен в этом запросе, не разлогиниваем
+        const currentToken = localStorage.getItem('barokot_token');
+        if (sentToken && currentToken && sentToken !== currentToken) {
+          console.warn('Ignoring stale 401 with outdated token on', url);
+          return res;
+        }
+
+        console.warn('Session expired or unauthorized request on', url);
+        const appScreen = document.getElementById('app-screen');
+        if (appScreen && !appScreen.classList.contains('hidden')) {
+          localStorage.removeItem('barokot_token');
+          localStorage.removeItem('barokot_user');
+          currentUser = null;
+          document.getElementById('app-screen').classList.add('hidden');
+          document.getElementById('login-screen').classList.remove('hidden');
+          if (typeof clearPin === 'function') clearPin();
+          if (typeof showToast === 'function') showToast('Сессия завершена. Пожалуйста, войдите по PIN-коду.', 'warning');
+        }
+      }
+      return res;
+    });
+  };
+})();
+
 // State
 let currentUser = null;
 let currentPin = '';
@@ -21,6 +79,7 @@ let courierLiveGpsActive = true;
 let leafletMap = null;
 let mapMarkers = [];
 let gpsTrackingInterval = null;
+let liveSyncInterval = null;
 let publicRatingValue = 5;
 let allCalls = [];
 let locationPickerMap = null;
@@ -31,7 +90,7 @@ let suggestedGeoAddress = null;
 let reverseGeocodeTimer = null;
 let activePickupModalOrder = null;
 
-const WORKSHOP_COORDINATES = [39.588503, 66.928409]; // Главный технологический цех COSMO Самарканд
+const WORKSHOP_COORDINATES = [39.588503, 66.928409]; // Главный технологический цех BAROKOT Самарканд
 const DISTRICT_CENTERS = {
   // Городские районы
   'Бульвар / Центр': [39.6542, 66.9597],
@@ -325,7 +384,7 @@ window.showToast = showToast;
 
 // Theme & Eye Comfort Management
 function toggleTheme() {
-  const current = localStorage.getItem('cosmo_theme') || localStorage.getItem('barokot_theme') || 'dark';
+  const current = localStorage.getItem('barokot_theme') || 'ivory';
   const next = current === 'dark' ? 'ivory' : 'dark';
   setTheme(next);
 }
@@ -346,13 +405,12 @@ function setTheme(themeName) {
     doc.setAttribute('data-theme', 'pure');
     doc.classList.remove('dark');
   } else {
-    // Default: 'ivory'
+    // Default: 'ivory' (Warm soothing ivory linen)
     themeName = 'ivory';
     body.setAttribute('data-theme', 'ivory');
     doc.setAttribute('data-theme', 'ivory');
     doc.classList.remove('dark');
   }
-  localStorage.setItem('cosmo_theme', themeName);
   localStorage.setItem('barokot_theme', themeName);
 
   // Update 3-way switcher in top bar
@@ -389,11 +447,11 @@ function setTheme(themeName) {
     if (isDark) {
       quickIcon.textContent = '☀️';
       quickLabel.textContent = 'Светлая';
-      if (quickBtn) quickBtn.title = 'Переключить на дневной режим';
+      if (quickBtn) quickBtn.title = 'Переключить на мягкий дневной режим (Айвори)';
     } else {
       quickIcon.textContent = '🌙';
       quickLabel.textContent = 'Тёмная';
-      if (quickBtn) quickBtn.title = 'Переключить на ночной режим';
+      if (quickBtn) quickBtn.title = 'Переключить на ночной изумрудный режим';
     }
   }
 
@@ -417,15 +475,11 @@ function setTheme(themeName) {
 
 // Initial Entry Point
 document.addEventListener('DOMContentLoaded', async () => {
-  // Apply saved eye-comfort theme (default to Cyber Space Teal dark theme)
-  const savedTheme = localStorage.getItem('cosmo_theme') || localStorage.getItem('barokot_theme') || 'dark';
+  // Apply saved eye-comfort theme (default to warm soothing ivory)
+  const savedTheme = localStorage.getItem('barokot_theme') || 'ivory';
   setTheme(savedTheme);
 
-  // Initialize live header clock & date ticker
-  updateHeaderClock();
-  setInterval(updateHeaderClock, 1000);
-
-  // 1. Check if public client tracking URL (?track=BRK-XXXX or #track-BRK-XXXX)
+  // 1. Check if public client tracking URL (?track=CSM-XXXX or #track-CSM-XXXX)
   const urlParams = new URLSearchParams(window.location.search);
   const trackParam = urlParams.get('track');
   const hash = window.location.hash;
@@ -438,7 +492,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 2. Check saved user in session
   const savedUser = localStorage.getItem('barokot_user');
-  if (savedUser) {
+  const savedToken = localStorage.getItem('barokot_token');
+  if (savedUser && savedToken) {
     try {
       const parsed = JSON.parse(savedUser);
       if (parsed && typeof parsed === 'object' && parsed.name && parsed.role) {
@@ -447,10 +502,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       } else {
         localStorage.removeItem('barokot_user');
+        localStorage.removeItem('barokot_token');
       }
     } catch (e) {
       console.warn('Corrupted barokot_user session cleared:', e);
       localStorage.removeItem('barokot_user');
+      localStorage.removeItem('barokot_token');
     }
   }
 
@@ -492,9 +549,9 @@ function updatePinDots() {
         dot.classList.remove('bg-transparent');
         dot.classList.add('bg-emerald-deep');
         if (isDark) {
-          dot.style.backgroundColor = '#4FB8B4';
-          dot.style.borderColor = '#4FB8B4';
-          dot.style.boxShadow = '0 0 12px rgba(79, 184, 180, 0.8)';
+          dot.style.backgroundColor = '#FFEFB3';
+          dot.style.borderColor = '#FFEFB3';
+          dot.style.boxShadow = '0 0 12px rgba(255, 239, 179, 0.8)';
         } else {
           dot.style.backgroundColor = '';
           dot.style.borderColor = '';
@@ -522,6 +579,10 @@ async function verifyPin() {
 
     if (res.ok && data.success) {
       currentUser = data.user;
+      if (data.token) {
+        localStorage.setItem('barokot_token', data.token);
+        localStorage.setItem('barokot_login_time', String(Date.now()));
+      }
       localStorage.setItem('barokot_user', JSON.stringify(currentUser));
       currentPin = '';
       updatePinDots();
@@ -543,13 +604,27 @@ function quickLogin(pin) {
 }
 
 function logout() {
-  if (gpsTrackingInterval) clearInterval(gpsTrackingInterval);
-  if (liveSyncInterval) clearInterval(liveSyncInterval);
-  localStorage.removeItem('barokot_user');
+  try {
+    if (gpsTrackingInterval) clearInterval(gpsTrackingInterval);
+    if (liveSyncInterval) clearInterval(liveSyncInterval);
+    gpsTrackingInterval = null;
+    liveSyncInterval = null;
+  } catch (e) {
+    console.warn('Interval cleanup notice:', e);
+  }
+  try {
+    localStorage.removeItem('barokot_user');
+    localStorage.removeItem('barokot_token');
+  } catch (e) {}
   currentUser = null;
-  document.getElementById('app-screen').classList.add('hidden');
-  document.getElementById('login-screen').classList.remove('hidden');
+  currentPin = '';
+
+  const appScreen = document.getElementById('app-screen');
+  const loginScreen = document.getElementById('login-screen');
+  if (appScreen) appScreen.classList.add('hidden');
+  if (loginScreen) loginScreen.classList.remove('hidden');
   clearPin();
+  if (window.lucide) lucide.createIcons();
 }
 
 // ================= APP INITIALIZATION =================
@@ -598,10 +673,14 @@ async function loadInitialData() {
       fetch('/api/calls').catch(() => null)
     ]);
 
-    activeOrders = await ordersRes.json();
-    allClients = await clientsRes.json();
-    allServices = await servicesRes.json();
-    allStaff = await staffRes.json();
+    activeOrders = (ordersRes && ordersRes.ok) ? (await ordersRes.json().catch(() => [])) : (activeOrders || []);
+    if (!Array.isArray(activeOrders)) activeOrders = [];
+    allClients = (clientsRes && clientsRes.ok) ? (await clientsRes.json().catch(() => [])) : (allClients || []);
+    if (!Array.isArray(allClients)) allClients = [];
+    allServices = (servicesRes && servicesRes.ok) ? (await servicesRes.json().catch(() => [])) : (allServices || []);
+    if (!Array.isArray(allServices)) allServices = [];
+    allStaff = (staffRes && staffRes.ok) ? (await staffRes.json().catch(() => [])) : (allStaff || []);
+    if (!Array.isArray(allStaff)) allStaff = [];
     if (callsRes && callsRes.ok) {
       try { allCalls = await callsRes.json(); } catch(e) { allCalls = []; }
     } else {
@@ -663,8 +742,6 @@ function recordNewLocalOrder(order) {
     timestamp: Date.now()
   });
 }
-
-let liveSyncInterval = null;
 
 async function silentSyncOrders() {
   if (!currentUser) return;
@@ -769,31 +846,9 @@ async function manualRefreshData() {
   }
 }
 
-// Live Header Clock & Date ticker
-function updateHeaderClock() {
-  const clockEl = document.getElementById('live-header-clock');
-  const dateEl = document.getElementById('live-header-date');
-  if (!clockEl && !dateEl) return;
-  const now = new Date();
-  if (clockEl) {
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    clockEl.textContent = `${hh}:${mm}`;
-  }
-  if (dateEl) {
-    const months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-    const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-    dateEl.textContent = `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}, ${days[now.getDay()]}`;
-  }
-}
-
 // ================= ROLE WINDOWS & PORTALS CONTROLLER =================
 
 function applyRoleWindow(role) {
-  // Security: non-admin roles cannot access main CRM
-  if (role === 'admin' && currentUser?.role && currentUser.role !== 'admin') {
-    role = currentUser.role;
-  }
   currentViewRole = role;
 
   const winAdmin = document.getElementById('window-admin');
@@ -854,24 +909,29 @@ function updateRoleSwitcherUi(activeRole) {
     const btn = document.getElementById(`btn-portal-switch-${r}`);
     if (btn) {
       if (r === activeRole) {
-        btn.className = 'px-2.5 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 bg-[#00B4D8] text-white shadow-sm';
+        btn.className = 'px-2.5 py-1 rounded-lg bg-butter text-emerald-deep shadow-xs flex items-center gap-1 font-bold';
       } else {
-        btn.className = 'px-2.5 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 text-[#67B0C5] hover:text-white hover:bg-white/5';
+        btn.className = 'px-2.5 py-1 rounded-lg hover:bg-white/10 text-butter flex items-center gap-1 transition';
       }
     }
   });
 
-  // Top switcher is visible ONLY for Administrator!
+  // Keep top switcher hidden as requested by the user
   const switcher = document.getElementById('nav-terminal-switcher');
   if (switcher) {
-    if (currentUser?.role === 'admin') {
-      switcher.classList.remove('hidden');
-      switcher.style.display = 'flex';
-    } else {
-      switcher.classList.add('hidden');
-      switcher.style.display = 'none';
-    }
+    switcher.classList.add('hidden');
+    switcher.style.display = 'none';
   }
+
+  const btnCourierAdmin = document.getElementById('btn-courier-to-admin');
+  const btnWasherAdmin = document.getElementById('btn-washer-to-admin');
+  const btnDispAdmin = document.getElementById('btn-disp-to-admin');
+  [btnCourierAdmin, btnWasherAdmin, btnDispAdmin].forEach(b => {
+    if (b) {
+      if (currentUser?.role === 'admin') b.classList.remove('hidden');
+      else b.classList.add('hidden');
+    }
+  });
 
   // Strictly control Mobile Bottom Nav: ONLY visible for Admin!
   const mobileBottomNav = document.getElementById('mobile-bottom-nav');
@@ -891,6 +951,13 @@ function updateRoleSwitcherUi(activeRole) {
 let currentLiquidActiveIndex = -1;
 
 function updateLiquidNavIndicator(activeIndex, animate = true) {
+  // Navigation indicator is strictly for mobile viewport (< 768px)
+  if (typeof window === 'undefined' || window.innerWidth >= 768) return;
+  const navEl = document.getElementById('mobile-bottom-nav');
+  if (!navEl || navEl.classList.contains('hidden') || navEl.style.display === 'none' || navEl.offsetParent === null) {
+    return;
+  }
+
   const navItems = document.getElementById('liquid-nav-items');
   const indicator = document.getElementById('liquid-nav-indicator');
   if (!navItems || !indicator) return;
@@ -912,8 +979,9 @@ function updateLiquidNavIndicator(activeIndex, animate = true) {
   const navRect = navItems.getBoundingClientRect();
   const btnRect = targetBtn.getBoundingClientRect();
 
+  // If container or button width is 0, element is not visible or not laid out.
+  // Never schedule unbounded recursive requestAnimationFrame!
   if (navRect.width === 0 || btnRect.width === 0) {
-    requestAnimationFrame(() => updateLiquidNavIndicator(activeIndex, false));
     return;
   }
 
@@ -941,27 +1009,33 @@ function updateLiquidNavIndicator(activeIndex, animate = true) {
 }
 
 function triggerLiquidRipple(event) {
-  const btn = event.currentTarget;
+  if (!event) return;
+  const btn = event.currentTarget || event.target?.closest('button');
   if (!btn) return;
-  const circle = document.createElement('span');
-  const diameter = Math.max(btn.clientWidth, btn.clientHeight);
-  const radius = diameter / 2;
-  const rect = btn.getBoundingClientRect();
+  try {
+    const circle = document.createElement('span');
+    const diameter = Math.max(btn.clientWidth || 40, btn.clientHeight || 40);
+    const radius = diameter / 2;
+    const rect = btn.getBoundingClientRect();
 
-  circle.style.width = circle.style.height = `${diameter}px`;
-  circle.style.left = `${(event.clientX ? event.clientX - rect.left : rect.width / 2) - radius}px`;
-  circle.style.top = `${(event.clientY ? event.clientY - rect.top : rect.height / 2) - radius}px`;
-  circle.classList.add('liquid-ripple');
+    circle.style.width = circle.style.height = `${diameter}px`;
+    circle.style.left = `${(event.clientX ? event.clientX - rect.left : (rect.width || 40) / 2) - radius}px`;
+    circle.style.top = `${(event.clientY ? event.clientY - rect.top : (rect.height || 40) / 2) - radius}px`;
+    circle.classList.add('liquid-ripple');
 
-  const oldRipple = btn.querySelector('.liquid-ripple');
-  if (oldRipple) oldRipple.remove();
+    const oldRipple = btn.querySelector('.liquid-ripple');
+    if (oldRipple) oldRipple.remove();
 
-  btn.appendChild(circle);
-  setTimeout(() => circle.remove(), 600);
+    btn.appendChild(circle);
+    setTimeout(() => circle.remove(), 600);
+  } catch (e) {
+    // Non-critical visual ripple
+  }
 }
 
 // Window resize listener to keep indicator aligned
 window.addEventListener('resize', () => {
+  if (window.innerWidth >= 768) return;
   if (currentLiquidActiveIndex >= 0) {
     updateLiquidNavIndicator(currentLiquidActiveIndex, false);
   }
@@ -973,8 +1047,8 @@ function renderMobileBottomNav(role = currentViewRole || 'admin') {
 
   const currentRole = role || 'admin';
 
-  // ПАНЕЛЬ ДОЛЖНА БЫТЬ ТОЛЬКО У АДМИНИСТРАТОРА! У курьера, мойщика и диспетчера - полностью скрыть!
-  if (currentRole !== 'admin') {
+  // ПАНЕЛЬ ДОЛЖНА БЫТЬ ТОЛЬКО У АДМИНИСТРАТОРА НА МОБИЛЬНОМ!
+  if (currentRole !== 'admin' || window.innerWidth >= 768) {
     navEl.classList.add('hidden');
     navEl.style.display = 'none';
     return;
@@ -1024,10 +1098,12 @@ function renderMobileBottomNav(role = currentViewRole || 'admin') {
     `;
   }).join('');
 
-  // Smoothly position liquid sliding capsule indicator
-  requestAnimationFrame(() => {
-    updateLiquidNavIndicator(activeIndex, true);
-  });
+  // Smoothly position liquid sliding capsule indicator only when on mobile
+  if (window.innerWidth < 768) {
+    requestAnimationFrame(() => {
+      updateLiquidNavIndicator(activeIndex, true);
+    });
+  }
 }
 
 // ================= SIDEBAR NAVIGATION MANAGEMENT =================
@@ -1189,25 +1265,25 @@ function renderDashboard() {
     urgentList.innerHTML = '<div class="text-xs text-charcoal-muted italic py-4 text-center">Нет срочных или требующих внимания заказов</div>';
   } else {
     urgentList.innerHTML = urgentOrders.map(o => `
-      <div class="flex items-center justify-between p-3 rounded-xl bg-black/5 hover:bg-black/10 border border-emerald-deep/15 hover:border-emerald-deep transition shadow-xs cursor-pointer" onclick="openEditOrderModal('${o.id}')">
+      <div class="flex items-center justify-between p-3 rounded-xl bg-white border border-emerald-deep/15 hover:border-emerald-deep transition shadow-sm cursor-pointer" onclick="openEditOrderModal('${o.id}')">
         <div class="flex items-center space-x-3">
-          <div class="w-9 h-9 rounded-xl ${o.urgent ? 'bg-rose-100 text-rose-700 border border-rose-300' : 'bg-emerald-deep/10 text-emerald-deep border border-emerald-deep/20'} flex items-center justify-center font-bold text-xs shrink-0">
+          <div class="w-9 h-9 rounded-xl ${o.urgent ? 'bg-rose-100 text-rose-700' : 'bg-emerald-deep/10 text-emerald-deep'} flex items-center justify-center font-bold text-xs">
             ${o.urgent ? '⚡' : '🏷️'}
           </div>
           <div>
             <div class="flex items-center gap-2">
-              <span class="font-mono font-bold text-xs text-emerald-deep">#${escapeHtml(o.id)}</span>
-              <span class="text-xs font-semibold text-charcoal">${escapeHtml(o.client_name)}</span>
+              <span class="font-bold text-xs text-emerald-deep">${o.id}</span>
+              <span class="text-xs font-semibold text-charcoal-muted">${escapeHtml(o.client_name)}</span>
               ${o.urgent ? '<span class="text-[10px] bg-rose-600 text-white px-1.5 py-0.2 rounded font-bold">СРОЧНО</span>' : ''}
             </div>
             <div class="text-[11px] text-charcoal-muted flex items-center gap-2 mt-0.5">
               <span>📍 ${escapeHtml(o.district || 'Сиёб')}, ${escapeHtml(o.client_address)}</span>
               <span>•</span>
-              <span class="font-mono font-bold text-emerald-deep">${(o.total_price || 0).toLocaleString()} сум</span>
+              <span class="font-mono font-bold">${(o.total_price || 0).toLocaleString()} сум</span>
             </div>
           </div>
         </div>
-        <div class="text-right shrink-0">
+        <div class="text-right">
           ${getStageBadge(o.stage)}
         </div>
       </div>
@@ -1217,19 +1293,15 @@ function renderDashboard() {
   // Render recent audit log
   const auditList = document.getElementById('dashboard-audit-list');
   const recentOrders = activeOrders.slice(0, 6);
-  if (!recentOrders || recentOrders.length === 0) {
-    auditList.innerHTML = '<div class="text-xs text-charcoal-muted italic py-2 text-center">Журнал операций пуст</div>';
-  } else {
-    auditList.innerHTML = recentOrders.map(o => `
-      <div class="flex items-start gap-2.5 border-b border-emerald-deep/10 pb-2.5">
-        <div class="w-2 h-2 rounded-full bg-emerald-deep mt-1.5 shrink-0"></div>
-        <div>
-          <div class="font-semibold text-emerald-deep text-xs">Заказ #${escapeHtml(o.id)} — ${getStageText(o.stage)}</div>
-          <div class="text-[10px] text-charcoal-muted">${escapeHtml(o.client_name)} • ${o.pickup_date || o.created_at || 'Сегодня'}</div>
-        </div>
+  auditList.innerHTML = recentOrders.map(o => `
+    <div class="flex items-start gap-2 border-b border-emerald-deep/10 pb-2">
+      <div class="w-2 h-2 rounded-full bg-emerald-deep mt-1.5 shrink-0"></div>
+      <div>
+        <div class="font-semibold text-emerald-deep">Заказ #${o.id} — ${getStageText(o.stage)}</div>
+        <div class="text-[10px] text-charcoal-muted">${escapeHtml(o.client_name)} (${o.pickup_date || o.created_at})</div>
       </div>
-    `).join('');
-  }
+    </div>
+  `).join('');
 
   if (window.lucide) lucide.createIcons();
 }
@@ -1270,10 +1342,10 @@ function renderOrdersTable(filteredList = null) {
         <td class="py-3 px-4">
           <div class="font-bold text-emerald-deep">${escapeHtml(o.client_name)}</div>
           <div class="flex items-center gap-1.5 mt-0.5" onclick="event.stopPropagation()">
-            <button type="button" onclick="callClient('${o.id}', '${escapeHtml(o.client_phone)}', '${escapeHtml(o.client_name)}')" class="text-[11px] text-emerald-deep font-bold hover:underline font-mono flex items-center gap-0.5" title="Позвонить с фиксацией в CRM">
+            <button type="button" onclick="callClient('${o.id}')" class="text-[11px] text-emerald-deep font-bold hover:underline font-mono flex items-center gap-0.5" title="Позвонить с фиксацией в CRM">
               📞 ${escapeHtml(o.client_phone)}
             </button>
-            <button type="button" onclick="openCallHistoryModal('${o.id}', '${escapeHtml(o.client_phone)}', '${escapeHtml(o.client_name)}')" class="text-[9px] px-1.5 py-0.5 rounded font-bold ${callsCount > 0 ? 'bg-amber-100 text-amber-900 border border-amber-300' : 'bg-gray-100 text-charcoal-muted'} hover:opacity-80" title="Журнал звонков (${callsCount} вызовов)">
+            <button type="button" onclick="openCallHistoryModal('${o.id}')" class="text-[9px] px-1.5 py-0.5 rounded font-bold ${callsCount > 0 ? 'bg-amber-100 text-amber-900 border border-amber-300' : 'bg-gray-100 text-charcoal-muted'} hover:opacity-80" title="Журнал звонков (${callsCount} вызовов)">
               ${callsCount > 0 ? `${callsCount} зв.` : '0'}
             </button>
           </div>
@@ -1389,7 +1461,12 @@ function renderKanban() {
 
   stages.forEach(st => {
     const col = document.getElementById(`kanban-col-${st}`);
-    if (col) col.innerHTML = '';
+    if (col) {
+      col.innerHTML = '';
+      col.setAttribute('ondragover', 'handleKanbanDragOver(event)');
+      col.setAttribute('ondragleave', 'handleKanbanDragLeave(event)');
+      col.setAttribute('ondrop', `handleKanbanDrop(event, '${st}')`);
+    }
   });
 
   activeOrders.forEach(o => {
@@ -1401,7 +1478,7 @@ function renderKanban() {
     const col = document.getElementById(`kanban-col-${st}`);
     if (col) {
       col.innerHTML += `
-        <div class="bg-white rounded-xl p-3 border border-emerald-deep/15 shadow-sm space-y-2 hover:border-emerald-deep transition cursor-pointer" onclick="openEditOrderModal('${o.id}')">
+        <div class="bg-white rounded-xl p-3 border border-emerald-deep/15 shadow-sm space-y-2 hover:border-emerald-deep transition cursor-grab active:cursor-grabbing select-none" draggable="true" ondragstart="handleKanbanDragStart(event, '${o.id}')" ondragend="handleKanbanDragEnd(event)" onclick="openEditOrderModal('${o.id}')">
           <div class="flex items-center justify-between text-[11px]">
             <div class="flex items-center gap-1.5">
               <span class="font-mono font-bold text-emerald-deep">#${escapeHtml(o.id)}</span>
@@ -1433,6 +1510,47 @@ function renderKanban() {
   });
 }
 
+// Надежный перенос заказа с мгновенным оптимистичным UI и блокировкой обратного отката
+async function moveOrderToStage(orderId, targetStage) {
+  const order = activeOrders.find(o => o.id === orderId);
+  if (!order) return;
+
+  const previousStage = normalizeStage(order.stage);
+  const normalizedTarget = normalizeStage(targetStage);
+  if (normalizedTarget === previousStage) return;
+
+  // Оптимистичное обновление в UI и фиксация в grace-периоде
+  order.stage = normalizedTarget;
+  recentLocalOrderMutations.set(orderId, { stage: normalizedTarget, timestamp: Date.now() });
+
+  renderKanban();
+  renderOrdersTable();
+  renderDashboard();
+  renderDispatcherPortal();
+  renderCourierPortal();
+  renderWasherPortal();
+
+  try {
+    const res = await fetch(`/api/orders/${orderId}/stage`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: normalizedTarget, actor_name: currentUser?.name || 'Администратор' })
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  } catch (e) {
+    console.error('Error saving order stage:', e);
+    // Откат при реальной ошибке сервера
+    order.stage = previousStage;
+    recentLocalOrderMutations.delete(orderId);
+    renderKanban();
+    renderOrdersTable();
+    renderDashboard();
+    alert('Ошибка при смене этапа заказа.');
+  }
+}
+
 async function advanceOrderStage(orderId, direction) {
   const stages = ['pickup', 'in_shop', 'ready', 'delivered'];
   const order = activeOrders.find(o => o.id === orderId);
@@ -1446,24 +1564,62 @@ async function advanceOrderStage(orderId, direction) {
   if (targetIdx < 0 || targetIdx >= stages.length) return;
 
   const targetStage = stages[targetIdx];
-  try {
-    const res = await fetch(`/api/orders/${orderId}/stage`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stage: targetStage, actor_name: currentUser?.name || 'Администратор' })
-    });
-    if (res.ok) {
-      order.stage = targetStage;
-      renderKanban();
-      renderOrdersTable();
-      renderDashboard();
-      renderDispatcherPortal();
-      renderCourierPortal();
-      renderWasherPortal();
-    }
-  } catch (e) {
-    alert('Ошибка при смене этапа заказа.');
+  await moveOrderToStage(orderId, targetStage);
+}
+
+// Drag & Drop функции для карточек канбана
+let draggedKanbanOrderId = null;
+
+function handleKanbanDragStart(e, orderId) {
+  draggedKanbanOrderId = orderId;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', orderId);
   }
+  const el = e.currentTarget;
+  if (el) {
+    setTimeout(() => el.classList.add('opacity-40', 'scale-98'), 0);
+  }
+}
+
+function handleKanbanDragEnd(e) {
+  const el = e.currentTarget;
+  if (el) {
+    el.classList.remove('opacity-40', 'scale-98');
+  }
+  draggedKanbanOrderId = null;
+  document.querySelectorAll('[id^="kanban-col-"]').forEach(col => {
+    col.classList.remove('ring-2', 'ring-emerald-deep/40', 'bg-emerald-50/40');
+  });
+}
+
+function handleKanbanDragOver(e) {
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  const col = e.currentTarget;
+  if (col && !col.classList.contains('ring-2')) {
+    col.classList.add('ring-2', 'ring-emerald-deep/40', 'bg-emerald-50/40');
+  }
+}
+
+function handleKanbanDragLeave(e) {
+  const col = e.currentTarget;
+  if (col) {
+    col.classList.remove('ring-2', 'ring-emerald-deep/40', 'bg-emerald-50/40');
+  }
+}
+
+async function handleKanbanDrop(e, targetStage) {
+  e.preventDefault();
+  const col = e.currentTarget;
+  if (col) {
+    col.classList.remove('ring-2', 'ring-emerald-deep/40', 'bg-emerald-50/40');
+  }
+  const orderId = (e.dataTransfer && e.dataTransfer.getData('text/plain')) || draggedKanbanOrderId;
+  if (orderId && targetStage) {
+    await moveOrderToStage(orderId, targetStage);
+  }
+  draggedKanbanOrderId = null;
 }
 
 // ================= VIEW 4: CLIENTS CRM =================
@@ -1713,7 +1869,7 @@ async function renderFinance() {
         <div class="bg-white p-3 rounded-xl border border-emerald-deep/15 shadow-sm flex items-center justify-between text-xs">
           <div>
             <div class="font-bold text-emerald-deep">${escapeHtml(a.employee_name)}</div>
-            <div class="text-[10px] text-charcoal-muted">${a.date} • ${escapeHtml(a.method || 'Наличные')}</div>
+            <div class="text-[10px] text-charcoal-muted">${escapeHtml(a.date)} • ${escapeHtml(a.method || 'Наличные')}</div>
             ${a.note ? `<div class="text-[10px] text-charcoal-muted italic mt-0.5">${escapeHtml(a.note)}</div>` : ''}
           </div>
           <div class="font-mono font-bold text-amber-700 text-sm">
@@ -2083,7 +2239,7 @@ function printCourierZReport(customData) {
   const html = `
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.35; color: #000; width: 76mm; margin: 0 auto;">
       <div style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px;">
-        <div style="font-size: 16px; font-weight: 900; letter-spacing: 1px;">COSMO CRM</div>
+        <div style="font-size: 16px; font-weight: 900; letter-spacing: 1px;">BAROKOT CRM</div>
         <div style="font-size: 12px; font-weight: 800; margin-top: 2px;">Z-ОТЧЕТ ЗАКРЫТИЯ СМЕНЫ</div>
         <div style="font-size: 9px; margin-top: 2px;">Сдача вечерней выручки экипажа</div>
       </div>
@@ -2148,7 +2304,7 @@ function printCourierZReport(customData) {
       </div>
 
       <div style="text-align: center; margin-top: 10px; font-size: 8px; color: #555;">
-        COSMO CRM Enterprise • Самарканд
+        BAROKOT CRM Enterprise • Самарканд
       </div>
     </div>
   `;
@@ -2478,10 +2634,11 @@ async function loadCourierShiftsHistory() {
       return;
     }
 
-    container.innerHTML = shifts.map(s => {
+    window._historicalShifts = shifts;
+
+    container.innerHTML = shifts.map((s, index) => {
       const shiftDateRu = s.shift_date ? s.shift_date.split('-').reverse().join('.') : s.shift_date;
       const acceptedAt = s.accepted_at ? formatDateSafe(s.accepted_at, true) : '';
-      const shiftJsonEscaped = JSON.stringify(s).replace(/"/g, '&quot;');
       return `
         <div class="bg-white p-3 rounded-xl border border-emerald-deep/15 shadow-xs flex flex-wrap items-center justify-between gap-2 text-xs">
           <div>
@@ -2500,7 +2657,7 @@ async function loadCourierShiftsHistory() {
               <div class="font-mono font-bold text-emerald-deep text-sm">${(s.net_cash_submitted || 0).toLocaleString()} сум</div>
               <div class="text-[10px] text-charcoal-muted">наличными в кассу</div>
             </div>
-            <button type="button" onclick='printHistoricalZReport(JSON.parse("${shiftJsonEscaped}"))' class="p-2 bg-emerald-deep/5 hover:bg-emerald-deep/10 text-emerald-deep rounded-lg transition" title="Печать Z-отчета">
+            <button type="button" onclick="printHistoricalZReportByIndex(${index})" class="p-2 bg-emerald-deep/5 hover:bg-emerald-deep/10 text-emerald-deep rounded-lg transition" title="Печать Z-отчета">
               <i data-lucide="printer" class="w-4 h-4"></i>
             </button>
           </div>
@@ -2512,6 +2669,11 @@ async function loadCourierShiftsHistory() {
   } catch (err) {
     container.innerHTML = '<div class="text-xs text-rose-700 italic py-2 text-center">Ошибка загрузки истории смен</div>';
   }
+}
+
+function printHistoricalZReportByIndex(index) {
+  if (!window._historicalShifts || !window._historicalShifts[index]) return;
+  printHistoricalZReport(window._historicalShifts[index]);
 }
 
 function printHistoricalZReport(shiftRecord) {
@@ -2631,11 +2793,11 @@ async function refreshMapMarkers() {
   // Plot central plant
   const plantIcon = L.divIcon({
     className: 'plant-marker',
-    html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:bold; font-size:11px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,0.3);">🏭 ЦЕХ COSMO CRM</div>`,
-    iconSize: [110, 30]
+    html: `<div style="background:#013E37; color:#FFEFB3; padding:4px 8px; border-radius:12px; font-weight:bold; font-size:11px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,0.3);">🏭 ЦЕХ BAROKOT</div>`,
+    iconSize: [100, 30]
   });
   const plantMarker = L.marker(WORKSHOP_COORDINATES, { icon: plantIcon }).addTo(leafletMap)
-    .bindPopup(`<b>🏭 Главный технологический цех COSMO CRM</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#04222B; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Проложить маршрут в Яндекс</a>`);
+    .bindPopup(`<b>🏭 Главный технологический цех BAROKOT</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#013E37; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Проложить маршрут в Яндекс</a>`);
   mapMarkers.push(plantMarker);
 
   // Plot active orders
@@ -2646,11 +2808,11 @@ async function refreshMapMarkers() {
     const isExactGps = coordInfo.isExact;
 
     const isUrgent = Boolean(o.urgent);
-    const color = (o.stage === 'ready' || o.stage === 'delivery') ? '#1D8B94' : (['in_shop', 'washing', 'dusting', 'drying'].includes(o.stage) ? '#10606F' : '#4FB8B4');
+    const color = (o.stage === 'ready' || o.stage === 'delivery') ? '#0d9488' : (['in_shop', 'washing', 'dusting', 'drying'].includes(o.stage) ? '#2563eb' : '#f59e0b');
 
     const markerIcon = L.divIcon({
       className: 'order-marker',
-      html: `<div style="background:${color}; color:#fff; padding:3px 7px; border-radius:10px; font-weight:800; font-size:10px; border:${isExactGps ? '2px solid #98D8D0' : '2px solid #fff'}; box-shadow:${isExactGps ? '0 0 8px rgba(29,139,148,0.7)' : '0 2px 5px rgba(0,0,0,0.3)'}; white-space:nowrap;">${isExactGps ? '🎯' : '📍'} ${o.id} ${isUrgent ? '⚡' : ''}</div>`,
+      html: `<div style="background:${color}; color:#fff; padding:3px 7px; border-radius:10px; font-weight:800; font-size:10px; border:${isExactGps ? '2px solid #FFEFB3' : '2px solid #fff'}; box-shadow:${isExactGps ? '0 0 8px rgba(1,62,55,0.7)' : '0 2px 5px rgba(0,0,0,0.3)'}; white-space:nowrap;">${isExactGps ? '🎯' : '📍'} ${escapeHtml(o.id)} ${isUrgent ? '⚡' : ''}</div>`,
       iconSize: [68, 24]
     });
 
@@ -2665,7 +2827,7 @@ async function refreshMapMarkers() {
       .bindPopup(`
         <div style="font-family:sans-serif; font-size:12px; min-width:210px; line-height:1.4; padding:3px;">
           <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:4px; margin-bottom:4px;">
-            <b style="color:#04222B; font-size:13px;">Заказ #${o.id}</b>
+            <b style="color:#013E37; font-size:13px;">Заказ #${escapeHtml(o.id)}</b>
             <span style="font-size:10px; font-weight:bold; color:${color};">${escapeHtml(o.stage)}</span>
           </div>
           <b>Клиент:</b> ${escapeHtml(o.client_name)}<br>
@@ -2675,15 +2837,15 @@ async function refreshMapMarkers() {
           ${o.notes ? `<div style="background:#FFFBEB; border:1px solid #FCD34D; color:#92400E; padding:3px 5px; border-radius:6px; font-size:11px; margin:4px 0;">💬 <b>Диспетчер:</b> ${escapeHtml(o.notes)}</div>` : ''}
 
           <div style="margin:4px 0; font-size:11px;">
-            ${isExactGps ? `<span style="color:#1D8B94; font-weight:bold;">🎯 Точные GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}</span>` : '<span style="color:#92400E;">📍 Приблизительный район</span>'}
+            ${isExactGps ? `<span style="color:#047857; font-weight:bold;">🎯 Точные GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}</span>` : '<span style="color:#92400E;">📍 Приблизительный район</span>'}
           </div>
 
           <div style="margin-top:8px; display:flex; flex-direction:column; gap:4px;">
-            <button type="button" onclick="callClient('${o.id}', '${escapeHtml(o.client_phone)}', '${escapeHtml(o.client_name)}')" style="background:#04222B; color:#98D8D0; border:none; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:bold; cursor:pointer;">📞 Позвонить (${escapeHtml(o.client_phone)})</button>
+            <button type="button" onclick="callClient('${o.id}')" style="background:#013E37; color:#FFEFB3; border:none; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:bold; cursor:pointer;">📞 Позвонить (${escapeHtml(o.client_phone)})</button>
             <div style="display:flex; gap:4px;">
               <button type="button" onclick="navigateToOrder('${o.id}', 'yandex')" style="flex:1; background:#d97706; color:#fff; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">🧭 Яндекс</button>
               <button type="button" onclick="navigateToOrder('${o.id}', 'google')" style="flex:1; background:#2563eb; color:#fff; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">🗺️ Google</button>
-              <button type="button" onclick="openNavigationModal('${o.id}')" style="flex:1; background:#04222B; color:#98D8D0; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">Подробнее</button>
+              <button type="button" onclick="openNavigationModal('${o.id}')" style="flex:1; background:#013E37; color:#FFEFB3; padding:5px 6px; border-radius:6px; border:none; font-size:10px; font-weight:bold; cursor:pointer;">Подробнее</button>
             </div>
             <button type="button" onclick="openLocationModal('${o.id}', false)" style="background:#f3f4f6; color:#374151; border:1px solid #d1d5db; padding:3px 6px; border-radius:6px; font-size:10px; font-weight:bold; cursor:pointer;">📍 ${isExactGps ? 'Изменить точку' : '🎯 Зафиксировать точку GPS'}</button>
           </div>
@@ -2701,7 +2863,7 @@ async function refreshMapMarkers() {
       const courierDisplayName = (loc.courier_name || 'Курьер').trim().split(' ')[0];
       const courierIcon = L.divIcon({
         className: 'courier-marker',
-        html: `<div style="background:#04222B; color:#98D8D0; padding:4px 9px; border-radius:12px; font-weight:800; font-size:11px; border:2px solid #98D8D0; box-shadow:0 0 10px rgba(29,139,148,0.8);">🚚 ${escapeHtml(courierDisplayName)}</div>`,
+        html: `<div style="background:#013E37; color:#FFEFB3; padding:4px 9px; border-radius:12px; font-weight:800; font-size:11px; border:2px solid #FFEFB3; box-shadow:0 0 10px rgba(1,62,55,0.8);">🚚 ${escapeHtml(courierDisplayName)}</div>`,
         iconSize: [90, 26]
       });
       const cm = L.marker([loc.lat, loc.lng], { icon: courierIcon }).addTo(leafletMap)
@@ -2779,6 +2941,14 @@ function getOrderCallCount(orderId, clientPhone) {
 }
 
 async function callClient(orderId, phone, clientName) {
+  if (!phone && orderId) {
+    const o = (typeof allOrders !== 'undefined' && Array.isArray(allOrders) ? allOrders : activeOrders).find(x => String(x.id) === String(orderId));
+    if (o) {
+      phone = o.client_phone;
+      clientName = o.client_name;
+    }
+  }
+
   if (!phone) {
     alert('Номер телефона клиента не указан');
     return;
@@ -2818,6 +2988,14 @@ async function callClient(orderId, phone, clientName) {
 async function openCallHistoryModal(orderId, clientPhone, clientName) {
   const modal = document.getElementById('modal-call-history');
   if (!modal) return;
+
+  if (!clientPhone && orderId) {
+    const o = (typeof allOrders !== 'undefined' && Array.isArray(allOrders) ? allOrders : activeOrders).find(x => String(x.id) === String(orderId));
+    if (o) {
+      clientPhone = o.client_phone;
+      clientName = o.client_name;
+    }
+  }
 
   const subtitle = document.getElementById('calls-modal-subtitle');
   const clientEl = document.getElementById('calls-modal-client');
@@ -3017,8 +3195,7 @@ function showIncomingCallModal(call) {
 
 function closeIncomingCallModal() {
   const modal = document.getElementById('modal-incoming-call');
-  if (!modal) return;
-  modal.classList.add('hidden');
+  if (modal) modal.classList.add('hidden');
 }
 
 async function dismissIncomingCall() {
@@ -3150,7 +3327,7 @@ function setLocationPickerMarker(lat, lng) {
 
   const customIcon = L.divIcon({
     className: 'location-picker-pin',
-    html: `<div style="background-color: #04222B; color: #98D8D0; border: 2px solid white; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.4); cursor: grab;">📍</div>`,
+    html: `<div style="background-color: #013E37; color: #FFEFB3; border: 2px solid white; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.4); cursor: grab;">📍</div>`,
     iconSize: [34, 34],
     iconAnchor: [17, 17]
   });
@@ -3889,6 +4066,59 @@ function resolveItemServiceMeta(preset = {}) {
   return { displayName, unit, price, matched };
 }
 
+function expandOrderItems(rawCarpets) {
+  if (!rawCarpets) return [];
+  let list = rawCarpets;
+  if (typeof rawCarpets === 'string') {
+    try { list = JSON.parse(rawCarpets); } catch (e) { list = []; }
+  }
+  if (!Array.isArray(list)) return [];
+
+  const expanded = [];
+  list.forEach((item, idx) => {
+    if (!item || typeof item !== 'object') return;
+    const count = Math.max(1, parseInt(item.qty || item.count, 10) || 1);
+    const meta = (typeof resolveItemServiceMeta === 'function') ? resolveItemServiceMeta(item) : { unit: 'м²', price: 14000, displayName: 'Ковер' };
+    const unit = String(item.unit || meta.unit || 'м²').toLowerCase();
+    const isPiece = unit === 'шт' || unit === 'штук' || unit === 'dona';
+    const isMeter = unit === 'метр' || unit === 'м' || unit === 'пог.м';
+    const hasDimensions = (Number(item.length) > 0 && Number(item.width) > 0) || (isMeter && Number(item.length) > 0);
+    const rawName = String(item.name || '').trim();
+    const baseName = rawName ? rawName.split(' (')[0].replace(/\s*#\d+$/, '').trim() : meta.displayName;
+
+    if (count > 1 && !hasDimensions) {
+      for (let i = 0; i < count; i++) {
+        expanded.push({
+          ...item,
+          name: `${baseName} #${i + 1}`,
+          unit: item.unit || meta.unit,
+          qty: 1,
+          count: 1,
+          price: item.price || meta.price,
+          length: Number(item.length) || (unit === 'м²' ? 3.0 : (isMeter ? 2.0 : 0)),
+          width: Number(item.width) || (unit === 'м²' ? 2.0 : 0),
+          area: Number(item.area) || 0,
+          total: Number(item.total) || 0,
+          defects: item.defects || item.note || ''
+        });
+      }
+    } else {
+      expanded.push({
+        ...item,
+        name: rawName || `${baseName} #${idx + 1}`,
+        unit: item.unit || meta.unit,
+        price: item.price || meta.price,
+        qty: count,
+        count: count,
+        defects: item.defects || item.note || ''
+      });
+    }
+  });
+
+  return expanded;
+}
+
+
 function getPickupModalItems() {
   const rows = document.querySelectorAll('#pickup-modal-items-container .pickup-item-row');
   const items = [];
@@ -3897,15 +4127,31 @@ function getPickupModalItems() {
     const count = parseInt(row.querySelector('.item-qty-input')?.value, 10) || 1;
     const note = row.querySelector('.item-note-input')?.value.trim() || '';
     const meta = resolveItemServiceMeta({ name });
-    items.push({
-      name,
-      type: meta.unit === 'м²' ? 'carpet' : 'textile',
-      count,
-      qty: count,
-      unit: meta.unit,
-      price: meta.price,
-      note
-    });
+    const unit = meta.unit || 'м²';
+    const baseName = name.replace(/\s*\(.*?\)/, '').trim() || 'Ковер';
+    if (count > 1) {
+      for (let i = 0; i < count; i++) {
+        items.push({
+          name: `${name} #${i + 1}`,
+          type: unit === 'м²' ? 'carpet' : 'textile',
+          count: 1,
+          qty: 1,
+          unit,
+          price: meta.price,
+          note
+        });
+      }
+    } else {
+      items.push({
+        name,
+        type: unit === 'м²' ? 'carpet' : 'textile',
+        count: 1,
+        qty: 1,
+        unit,
+        price: meta.price,
+        note
+      });
+    }
   });
   return items;
 }
@@ -4157,74 +4403,6 @@ function openNavigationModal(orderId) {
   if (window.lucide) lucide.createIcons();
 }
 
-async function captureCurrentGpsForOrder(orderId) {
-  const order = activeOrders.find(o => String(o.id) === String(orderId));
-  if (!order) return;
-
-  if (!navigator.geolocation) {
-    alert('Геолокация не поддерживается вашим браузером');
-    return;
-  }
-
-  if (typeof showToast === 'function') {
-    showToast('⏳ Определение спутниковых координат...');
-  }
-
-  navigator.geolocation.getCurrentPosition(
-    async (pos) => {
-      const lat = pos.coords.latitude;
-      const lng = pos.coords.longitude;
-      const coords = `${lat.toFixed(6)},${lng.toFixed(6)}`;
-      courierLastCoords = [lat, lng];
-
-      try {
-        const actorName = currentUser?.name || 'Курьер';
-        const res = await fetch(`/api/orders/${orderId}/location`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            gps_location: coords,
-            actor_name: actorName
-          })
-        });
-
-        if (res.ok) {
-          order.gps_location = coords;
-          const client = allClients.find(c => c.phone === order.client_phone);
-          if (client) client.gps_location = coords;
-
-          alert(`🎯 Точные GPS-координаты (${coords}) успешно зафиксированы для заказа #${orderId}!`);
-          openNavigationModal(orderId);
-          renderCourierPortalCards();
-          if (typeof renderOrdersTable === 'function') renderOrdersTable();
-        } else {
-          alert('Не удалось сохранить GPS на сервере');
-        }
-      } catch (err) {
-        alert('Ошибка связи с сервером при сохранении GPS: ' + err.message);
-      }
-    },
-    (err) => {
-      alert('⚠️ Не удалось определить координаты. Проверьте разрешение на геолокацию на телефоне.');
-    },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-  );
-}
-
-function copyNavModalCoords() {
-  const text = document.getElementById('nav-modal-coords-text')?.textContent?.trim();
-  if (!text) return;
-  navigator.clipboard.writeText(text).then(() => {
-    if (typeof showToast === 'function') {
-      showToast('📋 Координаты скопированы в буфер обмена: ' + text);
-    } else {
-      alert('Координаты скопированы: ' + text);
-    }
-  }).catch(() => {
-    alert('Координаты: ' + text);
-  });
-}
-
 // ================= COURIER ORDER DETAILED INFO MODAL =================
 function openCourierOrderInfoModal(orderId) {
   const order = (activeOrders || []).find(o => String(o.id) === String(orderId));
@@ -4351,7 +4529,10 @@ function openCourierOrderInfoModal(orderId) {
   };
 
   const printBtn = document.getElementById('courier-info-print-btn');
-  if (printBtn) printBtn.onclick = () => printOrderReceipt(order.id);
+  if (printBtn) {
+    printBtn.classList.add('hidden');
+    printBtn.style.display = 'none';
+  }
 
   modal.classList.remove('hidden');
 }
@@ -4372,13 +4553,81 @@ function contactClientTelegram(orderId) {
 
   let msg = '';
   if (isPickup) {
-    msg = `Здравствуйте, ${order.client_name || 'клиент'}! Служба стирки ковров Cosmo. Мы едем к вам забрать ковры (заказ #${order.id}). Будем ориентировочно через 15-20 минут. Пожалуйста, будьте дома!`;
+    msg = `Здравствуйте, ${order.client_name || 'клиент'}! Служба стирки ковров Barakat. Мы едем к вам забрать ковры (заказ #${order.id}). Будем ориентировочно через 15-20 минут. Пожалуйста, будьте дома!`;
   } else {
-    msg = `Здравствуйте, ${order.client_name || 'клиент'}! Служба стирки ковров Cosmo. Ваши ковры постираны и упакованы. Везем ваш заказ #${order.id}${remaining > 0 ? `, сумма к оплате: ${remaining.toLocaleString()} сум` : ''}. Будем ориентировочно через 15-20 минут.`;
+    msg = `Здравствуйте, ${order.client_name || 'клиент'}! Служба стирки ковров Barakat. Ваши ковры постираны и упакованы. Везем ваш заказ #${order.id}${remaining > 0 ? `, сумма к оплате: ${remaining.toLocaleString()} сум` : ''}. Будем ориентировочно через 15-20 минут.`;
   }
 
   const tgUrl = `https://t.me/+${cleanPhone}?text=${encodeURIComponent(msg)}`;
   window.open(tgUrl, '_blank');
+}
+
+async function captureCurrentGpsForOrder(orderId) {
+  const order = activeOrders.find(o => String(o.id) === String(orderId));
+  if (!order) return;
+
+  if (!navigator.geolocation) {
+    alert('Геолокация не поддерживается вашим браузером');
+    return;
+  }
+
+  if (typeof showToast === 'function') {
+    showToast('⏳ Определение спутниковых координат...');
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const coords = `${lat.toFixed(6)},${lng.toFixed(6)}`;
+      courierLastCoords = [lat, lng];
+
+      try {
+        const actorName = currentUser?.name || 'Курьер';
+        const res = await fetch(`/api/orders/${orderId}/location`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            gps_location: coords,
+            actor_name: actorName
+          })
+        });
+
+        if (res.ok) {
+          order.gps_location = coords;
+          const client = allClients.find(c => c.phone === order.client_phone);
+          if (client) client.gps_location = coords;
+
+          alert(`🎯 Точные GPS-координаты (${coords}) успешно зафиксированы для заказа #${orderId}!`);
+          openNavigationModal(orderId);
+          renderCourierPortalCards();
+          if (typeof renderOrdersTable === 'function') renderOrdersTable();
+        } else {
+          alert('Не удалось сохранить GPS на сервере');
+        }
+      } catch (err) {
+        alert('Ошибка связи с сервером при сохранении GPS: ' + err.message);
+      }
+    },
+    (err) => {
+      alert('⚠️ Не удалось определить координаты. Проверьте разрешение на геолокацию на телефоне.');
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+function copyNavModalCoords() {
+  const text = document.getElementById('nav-modal-coords-text')?.textContent?.trim();
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    if (typeof showToast === 'function') {
+      showToast('📋 Координаты скопированы в буфер обмена: ' + text);
+    } else {
+      alert('Координаты скопированы: ' + text);
+    }
+  }).catch(() => {
+    alert('Координаты: ' + text);
+  });
 }
 
 // Explicit window bindings
@@ -4395,9 +4644,6 @@ window.openNavigationModal = openNavigationModal;
 window.navigateToOrder = navigateToOrder;
 window.captureCurrentGpsForOrder = captureCurrentGpsForOrder;
 window.copyNavModalCoords = copyNavModalCoords;
-window.openCourierOrderInfoModal = openCourierOrderInfoModal;
-window.closeCourierOrderInfoModal = closeCourierOrderInfoModal;
-window.contactClientTelegram = contactClientTelegram;
 
 // ================= VIEW 9: INTEGRATIONS (SMS, TELEGRAM & TURSO DB) =================
 
@@ -4444,17 +4690,6 @@ async function loadIntegrationSettings() {
   try {
     const res = await fetch('/api/settings');
     const settings = await res.json();
-    window.currentCompanySettings = settings;
-
-    // Company profile & contacts
-    const compNameEl = document.getElementById('company-name-input');
-    const compPhoneEl = document.getElementById('company-phone-input');
-    const compCourierPhoneEl = document.getElementById('company-courier-phone-input');
-    const compAddressEl = document.getElementById('company-address-input');
-    if (compNameEl) compNameEl.value = settings.company_name || 'COSMO CRM';
-    if (compPhoneEl) compPhoneEl.value = settings.company_phone || '+998 95 032 33 30';
-    if (compCourierPhoneEl) compCourierPhoneEl.value = settings.courier_phone || '+998 20 002 20 99';
-    if (compAddressEl) compAddressEl.value = settings.company_address || 'г. Самарканд, ул. Мирзо Улугбека, 45';
 
     const tgToken = document.getElementById('tg-bot-token');
     const tgChat = document.getElementById('tg-chat-id');
@@ -4465,41 +4700,37 @@ async function loadIntegrationSettings() {
     const sheetsUrlEl = document.getElementById('sheets-webhook-url');
     const statusBadge = document.getElementById('eskiz-connection-status-badge');
 
+    // Кэш учетных данных Eskiz.uz в localStorage браузера (на случай холодного старта Vercel)
+    let cachedCreds = null;
+    try {
+      cachedCreds = JSON.parse(localStorage.getItem('barokot_eskiz_credentials') || 'null');
+    } catch (e) {}
+
+    const effectiveEmail = (settings.eskiz_email && settings.eskiz_email.trim()) || cachedCreds?.email || '';
+    const effectivePassword = (settings.eskiz_password && settings.eskiz_password.trim()) || (cachedCreds?.password && cachedCreds.password !== '••••••••' ? cachedCreds.password : '');
+    const effectiveToken = (settings.eskiz_token && settings.eskiz_token.trim()) || cachedCreds?.token || '';
+    const effectiveFrom = (settings.eskiz_from && settings.eskiz_from.trim()) || cachedCreds?.from || '4546';
+
     if (tgToken && settings.tg_bot_token) tgToken.value = settings.tg_bot_token;
     if (tgChat && settings.tg_chat_id) tgChat.value = settings.tg_chat_id;
-    if (eskizEmail && settings.eskiz_email) eskizEmail.value = settings.eskiz_email;
-    if (eskizPassword && settings.eskiz_password) eskizPassword.value = settings.eskiz_password;
-    if (eskizToken && settings.eskiz_token) eskizToken.value = settings.eskiz_token;
-    if (eskizFrom && settings.eskiz_from) eskizFrom.value = settings.eskiz_from;
+    if (eskizEmail && effectiveEmail) eskizEmail.value = effectiveEmail;
+    if (eskizPassword && effectivePassword) eskizPassword.value = effectivePassword;
+    if (eskizToken && effectiveToken) eskizToken.value = effectiveToken;
+    if (eskizFrom && effectiveFrom) eskizFrom.value = effectiveFrom;
+
+    if (effectiveEmail && effectivePassword && effectivePassword !== '••••••••') {
+      try {
+        localStorage.setItem('barokot_eskiz_credentials', JSON.stringify({
+          email: effectiveEmail,
+          password: effectivePassword,
+          token: effectiveToken,
+          from: effectiveFrom
+        }));
+      } catch (e) {}
+    }
 
     if (statusBadge) {
-      if (settings.eskiz_token) {
-        statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1.5 shadow-2xs';
-        statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span><span>Подключен (Онлайн)</span>';
-      } else if (settings.eskiz_email && settings.eskiz_password) {
-        statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1.5 shadow-2xs';
-        statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-spin"></span><span>Авторизация...</span>';
-        // Auto-login in background
-        fetch('/api/sms/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: settings.eskiz_email, password: settings.eskiz_password })
-        }).then(r => r.json()).then(d => {
-          if (d.success && d.token) {
-            statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1.5 shadow-2xs';
-            statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span><span>Подключен (Онлайн)</span>';
-            const tokInp = document.getElementById('eskiz-token');
-            if (tokInp) tokInp.value = d.token;
-            refreshSmsBalance(false);
-          }
-        }).catch(() => {});
-      } else {
-        statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-300 flex items-center gap-1.5';
-        statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span><span>Не подключен</span>';
-      }
-    }
-    if (false) {
-      if (settings.eskiz_token) {
+      if (effectiveToken || settings.eskiz_token) {
         statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1.5 shadow-2xs';
         statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span><span>Подключен (Онлайн)</span>';
       } else {
@@ -4575,7 +4806,7 @@ async function loadSmsAuditLogs() {
       }
 
       return `
-        <div class="p-2 bg-white dark:bg-[#052129] border border-emerald-deep/15 rounded-xl flex items-center justify-between gap-2 shadow-2xs hover:bg-butter/20 transition">
+        <div class="p-2 bg-white dark:bg-[#071410] border border-emerald-deep/15 rounded-xl flex items-center justify-between gap-2 shadow-2xs hover:bg-butter/20 transition">
           <div class="flex items-center gap-2 min-w-0 flex-1">
             <span class="text-xs shrink-0">${statusIcon}</span>
             <div class="min-w-0 flex-1">
@@ -4606,41 +4837,6 @@ function updateSheetsBadge(isConnected) {
     badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span> Не настроено';
   }
 }
-
-async function saveCompanyProfileSettings() {
-  const name = document.getElementById('company-name-input')?.value?.trim() || 'COSMO CRM';
-  const phone = document.getElementById('company-phone-input')?.value?.trim() || '+998 95 032 33 30';
-  const courierPhone = document.getElementById('company-courier-phone-input')?.value?.trim() || '+998 20 002 20 99';
-  const address = document.getElementById('company-address-input')?.value?.trim() || 'г. Самарканд, ул. Мирзо Улугбека, 45';
-
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        company_name: name,
-        company_phone: phone,
-        courier_phone: courierPhone,
-        company_address: address
-      })
-    });
-    if (res.ok) {
-      window.currentCompanySettings = {
-        ...(window.currentCompanySettings || {}),
-        company_name: name,
-        company_phone: phone,
-        courier_phone: courierPhone,
-        company_address: address
-      };
-      showToast('✅ Реквизиты и контакты компании успешно сохранены!');
-    } else {
-      showToast('Ошибка сохранения реквизитов', 'error');
-    }
-  } catch (e) {
-    showToast('Ошибка сети: ' + e.message, 'error');
-  }
-}
-window.saveCompanyProfileSettings = saveCompanyProfileSettings;
 
 async function saveGoogleSheetsSettings() {
   const url = document.getElementById('sheets-webhook-url')?.value?.trim();
@@ -4692,7 +4888,7 @@ async function testGoogleSheetsSync() {
     const res = await fetch('/api/integrations/google-sheets/test', { method: 'POST' });
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast('✅ Тестовый заказ #BRK-TEST успешно добавлен в Google Таблицу!');
+      showToast('✅ Тестовый заказ #CSM-TEST успешно добавлен в Google Таблицу!');
     } else {
       showToast('Ошибка связи: ' + (data.error || data.reason || 'Проверьте доступ "Все/Anyone" в Apps Script'), 'error');
     }
@@ -4781,7 +4977,7 @@ async function copyGoogleAppsScriptCode() {
 }
 
 function doGet(e) {
-  return respondJson({ status: 'active', app: 'COSMO CRM Google Sheets Integration', timestamp: new Date().toISOString() });
+  return respondJson({ status: 'active', app: 'BAROKOT CRM Google Sheets Integration', timestamp: new Date().toISOString() });
 }
 
 function respondJson(obj, status) {
@@ -4810,8 +5006,8 @@ function setupHeaders(sheet) {
     ];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
-    headerRange.setBackground('#04222B');
-    headerRange.setFontColor('#FFFFFF');
+    headerRange.setBackground('#013E37');
+    headerRange.setFontColor('#FFEFB3');
     headerRange.setFontWeight('bold');
     headerRange.setHorizontalAlignment('center');
     sheet.setFrozenRows(1);
@@ -4969,6 +5165,7 @@ async function testTelegramMessage() {
 
 async function refreshSmsBalance(showAlert = false) {
   const balanceEl = document.getElementById('sms-live-balance-text');
+  const statusBadge = document.getElementById('eskiz-connection-status-badge');
   if (balanceEl && !balanceEl.textContent.includes('сум')) {
     balanceEl.textContent = 'Проверка...';
   }
@@ -4980,9 +5177,17 @@ async function refreshSmsBalance(showAlert = false) {
       const uzs = (data.balance ?? data.balance_uzs ?? 0).toLocaleString();
       const count = data.smsCount ?? data.sms_count ?? 0;
       if (balanceEl) balanceEl.textContent = `${uzs} сум (~${count} SMS)`;
+      if (statusBadge) {
+        statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1.5 shadow-2xs';
+        statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span><span>Подключен (Онлайн)</span>';
+      }
       if (showAlert) alert(`Баланс Eskiz.uz:\n• Доступно: ${uzs} сум\n• Примерно: ${count} SMS`);
     } else {
       if (balanceEl) balanceEl.textContent = data.message || 'Не подключен';
+      if (statusBadge && data.configured === false) {
+        statusBadge.className = 'text-[10px] font-bold px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-300 flex items-center gap-1.5';
+        statusBadge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span><span>Не подключен</span>';
+      }
       if (showAlert) alert('Статус Eskiz.uz: ' + (data.message || data.error || 'Ошибка проверки баланса'));
     }
   } catch (err) {
@@ -4994,13 +5199,10 @@ async function refreshSmsBalance(showAlert = false) {
 async function autoLoginEskiz() {
   const email = document.getElementById('eskiz-email')?.value?.trim();
   const password = document.getElementById('eskiz-password')?.value?.trim();
+  const from = document.getElementById('eskiz-from')?.value?.trim() || '4546';
 
   if (!email || !password) {
-    if (typeof showToast === 'function') {
-      showToast('Пожалуйста, введите Email и Пароль от кабинета Eskiz.uz!', 'warning');
-    } else {
-      alert('Пожалуйста, введите Email и Пароль от кабинета Eskiz.uz!');
-    }
+    alert('Пожалуйста, введите Email и Пароль от кабинета Eskiz.uz!');
     return;
   }
 
@@ -5019,26 +5221,33 @@ async function autoLoginEskiz() {
       const tokenInput = document.getElementById('eskiz-token');
       if (tokenInput) tokenInput.value = data.token;
 
-      if (typeof showToast === 'function') {
-        showToast('✅ Успешная авторизация в Eskiz.uz! Токен сохранен.', 'success');
-      } else {
-        alert('✅ Успешная авторизация в Eskiz.uz! Токен получен и сохранен.');
-      }
+      // Мгновенно кэшируем в localStorage браузера
+      try {
+        localStorage.setItem('barokot_eskiz_credentials', JSON.stringify({
+          email, password, token: data.token, from
+        }));
+      } catch (e) {}
+
+      // Сохраняем полный комплект в настройки сервера
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eskiz_email: email,
+          eskiz_password: password,
+          eskiz_token: data.token,
+          eskiz_from: from
+        })
+      });
+
+      alert('✅ Успешная авторизация в Eskiz.uz! JWT-токен получен и сохранен.');
       await loadIntegrationSettings();
-      await refreshSmsBalance(false);
+      refreshSmsBalance(false);
     } else {
-      if (typeof showToast === 'function') {
-        showToast('Ошибка входа в Eskiz: ' + (data.error || 'Неверный email или пароль'), 'error');
-      } else {
-        alert('Ошибка входа в Eskiz: ' + (data.error || 'Неверный email или пароль'));
-      }
+      alert('Ошибка входа в Eskiz: ' + (data.error || 'Неверный email или пароль'));
     }
   } catch (err) {
-    if (typeof showToast === 'function') {
-      showToast('Сетевая ошибка при авторизации в Eskiz: ' + err.message, 'error');
-    } else {
-      alert('Сетевая ошибка при авторизации в Eskiz: ' + err.message);
-    }
+    alert('Сетевая ошибка при авторизации в Eskiz: ' + err.message);
   } finally {
     if (btn) btn.innerHTML = oldText;
   }
@@ -5050,8 +5259,7 @@ async function saveSmsSettings() {
   let token = document.getElementById('eskiz-token')?.value?.trim() || '';
   const fromName = document.getElementById('eskiz-from')?.value?.trim() || '4546';
 
-  // Smart Auto-Login: if user entered email & password, ensure token is fetched immediately!
-  if (email && password && !token) {
+  if (email && password && password !== '••••••••' && !token) {
     try {
       const authRes = await fetch('/api/sms/login', {
         method: 'POST',
@@ -5059,18 +5267,27 @@ async function saveSmsSettings() {
         body: JSON.stringify({ email, password })
       });
       const authData = await authRes.json();
-      if (authRes.ok && authData.token) {
+      if (authData?.token) {
         token = authData.token;
         const tokenInput = document.getElementById('eskiz-token');
         if (tokenInput) tokenInput.value = token;
       }
     } catch (e) {
-      console.warn('Auto auth during save:', e);
+      console.warn('Auto Eskiz auth error during save:', e);
     }
   }
 
+  // Кэшируем в localStorage только реальный пароль
+  if (password && password !== '••••••••') {
+    try {
+      localStorage.setItem('barokot_eskiz_credentials', JSON.stringify({
+        email, password, token, from: fromName
+      }));
+    } catch (e) {}
+  }
+
   const payload = { eskiz_email: email, eskiz_from: fromName };
-  if (password) payload.eskiz_password = password;
+  if (password && password !== '••••••••') payload.eskiz_password = password;
   if (token) payload.eskiz_token = token;
 
   await fetch('/api/settings', {
@@ -5092,13 +5309,9 @@ async function saveSmsSettings() {
     body: JSON.stringify(triggers)
   });
 
-  if (typeof showToast === 'function') {
-    showToast('✅ Настройки Eskiz SMS и триггеры успешно сохранены!', 'success');
-  } else {
-    alert('✅ Настройки Eskiz SMS и триггеры успешно сохранены!');
-  }
+  alert('✅ Настройки Eskiz SMS и триггеры успешно сохранены!');
   await loadIntegrationSettings();
-  await refreshSmsBalance(false);
+  refreshSmsBalance(false);
 }
 
 async function testCustomSmsMessage() {
@@ -5129,7 +5342,8 @@ async function testCustomSmsMessage() {
     });
     const data = await res.json();
     if (res.ok && data.success) {
-      alert(`✅ Тестовое SMS успешно отправлено на ${phone} через Eskiz.uz!\nСтатус: ${data.status || 'Отправлено'}`);
+      const notice = data.moderationNotice ? `\n\nℹ️ ${data.moderationNotice}` : '';
+      alert(`✅ Тестовое SMS успешно отправлено на ${phone} через Eskiz.uz!\nСтатус: ${data.status || 'Отправлено'}${notice}`);
       refreshSmsBalance(false);
     } else if (data.simulated) {
       alert(`⚠️ SMS находится в режиме симуляции: ${data.reason || 'токен Eskiz.uz не настроен'}.\nДля реальной отправки введите Email и Пароль от Eskiz.uz выше и нажмите «Войти в Eskiz».`);
@@ -5155,11 +5369,11 @@ async function testSmsMessage() {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ eskiz_email: email, ...(token ? { eskiz_token: token } : {}), eskiz_from: fromName })
+      body: JSON.stringify({ eskiz_email: email, eskiz_token: token, eskiz_from: fromName })
     });
   }
 
-  const phone = prompt('Введите номер телефона для отправки тестового SMS (+998XXXXXXXXX):', '+998950323330');
+  const phone = prompt('Введите номер телефона для отправки тестового SMS (+998XXXXXXXXX):', '+998901234567');
   if (!phone) return;
 
   try {
@@ -5476,57 +5690,83 @@ function populateStaffSelects() {
 }
 
 function openNewOrderModal() {
-  currentEditingOrder = null;
-  document.getElementById('modal-order-title').textContent = '📝 Новая заявка на забор ковров';
-  document.getElementById('order-form-id').value = '';
-  
-  const customIdInput = document.getElementById('order-form-custom-id');
-  if (customIdInput) customIdInput.value = '';
-  const createdDateBox = document.getElementById('order-form-created-date-box');
-  if (createdDateBox) createdDateBox.classList.add('hidden');
+  try {
+    currentEditingOrder = null;
+    const modalTitle = document.getElementById('modal-order-title');
+    if (modalTitle) modalTitle.textContent = '📝 Новая заявка на забор ковров';
+    
+    const formId = document.getElementById('order-form-id');
+    if (formId) formId.value = '';
+    
+    const customIdInput = document.getElementById('order-form-custom-id');
+    if (customIdInput) customIdInput.value = '';
+    const createdDateBox = document.getElementById('order-form-created-date-box');
+    if (createdDateBox) createdDateBox.classList.add('hidden');
 
-  document.getElementById('order-client-name').value = '';
-  document.getElementById('order-client-phone').value = '+998 ';
-  document.getElementById('order-client-address').value = '';
-  document.getElementById('order-district').value = 'Сиёб';
-  document.getElementById('order-landmark').value = '';
-  document.getElementById('order-language').value = 'Русский';
-  document.getElementById('order-timeslot').value = 'В любое время';
-  document.getElementById('order-urgent-check').checked = false;
-  document.getElementById('order-stage-select').value = 'pickup';
-  document.getElementById('order-notes').value = '';
+    const clientName = document.getElementById('order-client-name');
+    if (clientName) clientName.value = '';
+    const clientPhone = document.getElementById('order-client-phone');
+    if (clientPhone) clientPhone.value = '+998 ';
+    const clientAddress = document.getElementById('order-client-address');
+    if (clientAddress) clientAddress.value = '';
+    const district = document.getElementById('order-district');
+    if (district) district.value = 'Сиёб';
+    const landmark = document.getElementById('order-landmark');
+    if (landmark) landmark.value = '';
+    const language = document.getElementById('order-language');
+    if (language) language.value = 'Русский';
+    const timeslot = document.getElementById('order-timeslot');
+    if (timeslot) timeslot.value = 'В любое время';
+    const urgentCheck = document.getElementById('order-urgent-check');
+    if (urgentCheck) urgentCheck.checked = false;
+    const stageSelect = document.getElementById('order-stage-select');
+    if (stageSelect) stageSelect.value = 'pickup';
+    const notes = document.getElementById('order-notes');
+    if (notes) notes.value = '';
 
-  const gpsInput = document.getElementById('order-form-gps-location');
-  const gpsStatus = document.getElementById('order-form-gps-status');
-  if (gpsInput) gpsInput.value = '';
-  if (gpsStatus) gpsStatus.textContent = 'Не указана (будет определена курьером при заборе)';
+    const gpsInput = document.getElementById('order-form-gps-location');
+    const gpsStatus = document.getElementById('order-form-gps-status');
+    if (gpsInput) gpsInput.value = '';
+    if (gpsStatus) gpsStatus.textContent = 'Не указана (будет определена курьером при заборе)';
 
-  const courierSelect = document.getElementById('order-courier-name');
-  if (courierSelect) {
-    if (currentUser?.role === 'courier') {
-      courierSelect.value = currentUser.name;
-    } else {
-      courierSelect.value = ''; // Свободный заказ: открыт для всех курьеров на смене!
+    const courierSelect = document.getElementById('order-courier-name');
+    if (courierSelect) {
+      if (currentUser?.role === 'courier') {
+        courierSelect.value = currentUser.name;
+      } else {
+        courierSelect.value = ''; // Свободный заказ: открыт для всех курьеров на смене!
+      }
     }
+
+    const printBtn = document.getElementById('btn-print-receipt');
+    if (printBtn) printBtn.classList.add('hidden');
+    const qrBtn = document.getElementById('btn-qr-receipt');
+    if (qrBtn) qrBtn.classList.add('hidden');
+    const delBtn = document.getElementById('btn-delete-order');
+    if (delBtn) delBtn.classList.add('hidden');
+    const btnPhotos = document.getElementById('btn-order-photos');
+    if (btnPhotos) btnPhotos.classList.add('hidden');
+
+    // Show add item button and washer measurement notice
+    const addBtn = document.getElementById('btn-add-order-item');
+    if (addBtn) addBtn.classList.remove('hidden');
+    const noticeEl = document.getElementById('order-form-measure-notice');
+    if (noticeEl) noticeEl.classList.remove('hidden');
+
+    const container = document.getElementById('order-form-items-container');
+    if (container) {
+      container.innerHTML = '';
+      addOrderFormItemRow();
+    }
+
+    const modal = document.getElementById('modal-order');
+    if (modal) modal.classList.remove('hidden');
+    if (window.lucide) lucide.createIcons();
+  } catch (err) {
+    console.error('Error opening new order modal:', err);
+    const modal = document.getElementById('modal-order');
+    if (modal) modal.classList.remove('hidden');
   }
-
-  document.getElementById('btn-print-receipt').classList.add('hidden');
-  document.getElementById('btn-qr-receipt').classList.add('hidden');
-  document.getElementById('btn-delete-order').classList.add('hidden');
-  const btnPhotos = document.getElementById('btn-order-photos');
-  if (btnPhotos) btnPhotos.classList.add('hidden');
-
-  // Show add item button and washer measurement notice
-  const addBtn = document.getElementById('btn-add-order-item');
-  if (addBtn) addBtn.classList.remove('hidden');
-  const noticeEl = document.getElementById('order-form-measure-notice');
-  if (noticeEl) noticeEl.classList.remove('hidden');
-
-  const container = document.getElementById('order-form-items-container');
-  container.innerHTML = '';
-  addOrderFormItemRow();
-
-  document.getElementById('modal-order').classList.remove('hidden');
 }
 
 function openEditOrderModal(orderId) {
@@ -5567,7 +5807,12 @@ function openEditOrderModal(orderId) {
       : 'Не указана (будет определена курьером при заборе)';
   }
 
-  document.getElementById('btn-print-receipt').classList.remove('hidden');
+  const isStaffReceiptAllowed = currentUser && ['admin', 'dispatcher'].includes(currentUser.role);
+  const printBtnEl = document.getElementById('btn-print-receipt');
+  if (printBtnEl) {
+    if (isStaffReceiptAllowed) printBtnEl.classList.remove('hidden');
+    else printBtnEl.classList.add('hidden');
+  }
   document.getElementById('btn-qr-receipt').classList.remove('hidden');
   document.getElementById('btn-delete-order').classList.remove('hidden');
 
@@ -5666,7 +5911,7 @@ function addOrderFormItemRow(preset = null) {
   div.innerHTML = `
     <div class="flex-1">
       <select class="item-name-input w-full p-1.5 text-xs rounded-lg border border-emerald-deep/20 bg-butter-surface font-semibold text-emerald-deep">
-        ${allServices.map(s => `<option value="${s.name}" data-price="${s.price}" data-unit="${s.unit}" ${s.name === currentName ? 'selected' : ''}>${s.name}</option>`).join('')}
+        ${allServices.map(s => `<option value="${escapeHtml(s.name)}" data-price="${s.price}" data-unit="${escapeHtml(s.unit || 'м²')}" ${s.name === currentName ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
       </select>
     </div>
     <div class="w-28 flex items-center border border-emerald-deep/20 rounded-lg overflow-hidden bg-butter-surface">
@@ -5897,30 +6142,17 @@ function renderDispatcherPortal() {
     { id: 'urgent', label: '⚡ Срочные', count: urgent }
   ];
 
-  // Update Dispatcher Top 4 KPI Metrics Cards
-  const kpiNewEl = document.getElementById('disp-kpi-new');
-  if (kpiNewEl) kpiNewEl.textContent = pickups;
-  const kpiPickupEl = document.getElementById('disp-kpi-pickup');
-  if (kpiPickupEl) kpiPickupEl.textContent = pickups;
-  const kpiWashEl = document.getElementById('disp-kpi-washing');
-  if (kpiWashEl) kpiWashEl.textContent = inShop;
-  const kpiDelivEl = document.getElementById('disp-kpi-delivery');
-  if (kpiDelivEl) kpiDelivEl.textContent = ready;
-
   pillsContainer.innerHTML = pills.map(p => {
     const isActive = activeDispatcherFilter === p.id;
-    const activeCls = isActive 
-      ? 'bg-[#00B4D8] text-white shadow-md' 
-      : 'bg-[#072632] text-[#67B0C5] border border-[#0E4352] hover:bg-[#0A3542] hover:text-white';
+    const activeCls = isActive ? 'bg-emerald-deep text-butter shadow' : 'bg-white text-emerald-deep border border-emerald-deep/20 hover:bg-butter-surface';
     return `
       <button type="button" onclick="setDispatcherFilter('${p.id}')" class="py-1.5 px-3 rounded-xl font-bold whitespace-nowrap transition flex items-center gap-1.5 ${activeCls}">
         <span>${p.label}</span>
-        <span class="px-1.5 py-0.2 rounded-full text-[10px] ${isActive ? 'bg-white/20 text-white' : 'bg-[#03141D] text-[#00E5FF] border border-[#0E4352]'}">${p.count}</span>
+        <span class="px-1.5 py-0.2 rounded-full text-[10px] ${isActive ? 'bg-butter/30 text-butter' : 'bg-emerald-deep/10 text-emerald-deep'}">${p.count}</span>
       </button>
     `;
   }).join('');
 
-  renderDispatcherCourierMonitor();
   renderDispatcherPortalOrders();
 }
 
@@ -5946,7 +6178,6 @@ async function quickAssignCourier(orderId, courierName) {
       renderDispatcherPortalOrders();
       renderOrdersTable();
       renderKanban();
-      renderDispatcherCourierMonitor();
     } else {
       alert('Ошибка назначения курьера');
     }
@@ -6014,13 +6245,10 @@ function renderDispatcherPortalOrders() {
     return `
       <div class="theme-card border border-emerald-deep/20 rounded-2xl p-4 shadow-sm hover:shadow-md transition flex flex-col justify-between space-y-3">
         <div>
-          <!-- Header: ID + Urgent + Stage + Quick Receipt Button -->
+          <!-- Header: ID + Urgent + Stage -->
           <div class="flex items-center justify-between gap-2 border-b border-emerald-deep/10 pb-2">
             <div class="flex items-center gap-1.5">
               <span class="font-mono font-bold text-xs px-2.5 py-1 rounded-xl bg-emerald-deep text-butter shadow-xs">#${escapeHtml(order.id)}</span>
-              <button type="button" onclick="printOrderReceipt('${order.id}')" class="p-1 rounded-lg text-charcoal-muted hover:text-emerald-deep hover:bg-emerald-deep/10 transition" title="Быстрая печать чека накладной">
-                <i data-lucide="printer" class="w-3.5 h-3.5"></i>
-              </button>
               ${order.urgent ? '<span class="bg-rose-100 text-rose-800 text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse">⚡ Срочно (+20%)</span>' : ''}
             </div>
             <div>${getStageBadge(order.stage)}</div>
@@ -6095,11 +6323,7 @@ function renderDispatcherPortalOrders() {
         <!-- Actions Toolbar -->
         <div class="border-t border-emerald-deep/15 pt-2.5 flex items-center justify-between gap-1.5 flex-wrap">
           <div class="flex items-center gap-1.5 flex-wrap">
-            <button type="button" onclick="printOrderReceipt('${order.id}')" class="py-1.5 px-2.5 bg-emerald-deep text-butter rounded-xl text-xs font-bold hover:bg-emerald-hover transition flex items-center gap-1 shadow-xs" title="Печать чека / накладной">
-              <i data-lucide="printer" class="w-3.5 h-3.5"></i>
-              <span>Печать чека</span>
-            </button>
-            <button type="button" onclick="openEditOrderModal('${order.id}')" class="py-1.5 px-2.5 bg-white text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold hover:bg-butter transition flex items-center gap-1 shadow-xs">
+            <button type="button" onclick="openEditOrderModal('${order.id}')" class="py-1.5 px-2.5 bg-emerald-deep text-butter rounded-xl text-xs font-bold hover:bg-emerald-hover transition flex items-center gap-1 shadow-xs">
               <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
               <span>Редактировать</span>
             </button>
@@ -6134,368 +6358,6 @@ function renderDispatcherPortalOrders() {
   }).join('');
 
   if (window.lucide) lucide.createIcons();
-}
-
-// ================= DISPATCHER COURIER RADAR & ACTIVITY MONITOR =================
-
-let dispCourierMap = null;
-let dispCourierMarkers = [];
-let isDispCourierMonitorExpanded = true;
-let isDispCourierMapExpanded = false;
-
-function toggleDispatcherCourierMonitor() {
-  const section = document.getElementById('disp-courier-monitor-section');
-  if (!section) return;
-  isDispCourierMonitorExpanded = !isDispCourierMonitorExpanded;
-  section.classList.toggle('hidden', !isDispCourierMonitorExpanded);
-  if (isDispCourierMonitorExpanded) {
-    renderDispatcherCourierMonitor();
-  }
-}
-
-async function renderDispatcherCourierMonitor() {
-  const container = document.getElementById('disp-couriers-live-cards');
-  const badgeEl = document.getElementById('disp-couriers-online-badge');
-  if (!container) return;
-
-  // 1. Fetch courier live locations
-  let locations = [];
-  try {
-    const res = await fetch('/api/gps/locations');
-    if (res.ok) locations = await res.json();
-  } catch (e) {}
-
-  // 2. Identify all couriers (from staff + active orders + locations)
-  const defaultCourierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
-  const couriersList = [];
-  const staffCouriers = allStaff.filter(s => s.role === 'courier');
-  staffCouriers.forEach(s => couriersList.push({ name: s.name, phone: s.phone || defaultCourierPhone }));
-
-  // Add default courier if staff list is empty
-  if (couriersList.length === 0) {
-    couriersList.push({ name: 'Дамир (Курьер / Доставка)', phone: defaultCourierPhone });
-  }
-
-  // Find any courier mentioned in orders
-  activeOrders.forEach(o => {
-    const cn = cleanCourierName(o.courier_name);
-    if (cn && !couriersList.some(c => c.name.toLowerCase().includes(cn.toLowerCase()) || cn.toLowerCase().includes(c.name.toLowerCase()))) {
-      couriersList.push({ name: cn, phone: defaultCourierPhone });
-    }
-  });
-
-  // Calculate workloads and statuses
-  let onlineCount = 0;
-  const cardsHtml = couriersList.map(courier => {
-    const cName = courier.name;
-    const cleanC = cName.replace(/\s*\(.*?\)\s*/g, '').trim();
-
-    // Match location
-    const loc = locations.find(l => {
-      if (!l || !l.courier_name) return false;
-      const ln = l.courier_name.toLowerCase();
-      return ln.includes(cleanC.toLowerCase()) || cleanC.toLowerCase().includes(ln);
-    }) || locations[0]; // fallback to first location if single crew
-
-    const isOnline = Boolean(loc && typeof loc.lat === 'number' && !isNaN(loc.lat));
-    if (isOnline) onlineCount++;
-
-    // Calculate orders assigned to this courier
-    const myOrders = activeOrders.filter(o => isOrderForCourier(o, { role: 'courier', name: cName }));
-    const myPickups = myOrders.filter(o => isPickupStage(o.stage));
-    const myDeliveries = myOrders.filter(o => isReadyOrDeliveryStage(o.stage));
-    const todayIso = toIsoDateSafe(new Date()) || new Date().toISOString().slice(0, 10);
-    const myDoneToday = myOrders.filter(o => {
-      if (!isDeliveredStage(o.stage)) return false;
-      const orderDate = toIsoDateSafe(o.delivery_date || o.completed_date || o.created_at);
-      return orderDate ? orderDate === todayIso : true;
-    });
-
-    // Calculate cash in pocket for courier
-    let courierCash = 0;
-    myDoneToday.forEach(o => {
-      if (o.payment_method === 'cash' || (!o.payment_method && o.paid)) {
-        courierCash += (o.paid_amount || o.total_price || 0);
-      }
-    });
-
-    // Current active task
-    let currentTaskText = '';
-    let currentOrder = myDeliveries[0] || myPickups[0];
-    if (currentOrder) {
-      const isDeliv = isReadyOrDeliveryStage(currentOrder.stage);
-      currentTaskText = `
-        <div class="mt-1.5 p-2 bg-emerald-deep/5 rounded-xl border border-emerald-deep/10 text-[11px]">
-          <div class="font-bold text-emerald-deep flex items-center justify-between">
-            <span>${isDeliv ? '🚚 Доставляет заказ' : '📦 Едет на забор'} #${escapeHtml(currentOrder.id)}:</span>
-            <span class="font-mono">${(currentOrder.total_price || 0).toLocaleString()} сум</span>
-          </div>
-          <div class="text-charcoal-deep font-semibold truncate mt-0.5">${escapeHtml(currentOrder.client_name)} • ${escapeHtml(currentOrder.client_address)}</div>
-          <div class="text-[10px] text-charcoal-muted">${escapeHtml(currentOrder.district || 'Самарканд')} • Тел: ${escapeHtml(currentOrder.client_phone)}</div>
-        </div>
-      `;
-    } else {
-      currentTaskText = `
-        <div class="mt-1.5 p-2 bg-gray-50 rounded-xl border border-gray-200 text-[11px] text-charcoal-muted font-medium flex items-center gap-1.5">
-          <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-600"></i>
-          <span>Свободен (нет активных заявок)</span>
-        </div>
-      `;
-    }
-
-    const lat = loc?.lat || 39.6542;
-    const lng = loc?.lng || 66.9597;
-    const speed = loc?.speed ? Math.round(loc.speed) : 0;
-    const battery = loc?.battery || 95;
-
-    return `
-      <div class="p-3.5 rounded-2xl bg-white border border-emerald-deep/15 shadow-xs flex flex-col justify-between space-y-2 hover:shadow-md transition">
-        <div>
-          <!-- Courier Header -->
-          <div class="flex items-center justify-between gap-2 border-b border-emerald-deep/10 pb-2">
-            <div class="flex items-center gap-2 min-w-0">
-              <div class="w-8 h-8 rounded-xl bg-emerald-deep text-butter flex items-center justify-center font-bold text-sm shrink-0">
-                <i data-lucide="truck" class="w-4 h-4"></i>
-              </div>
-              <div class="min-w-0">
-                <h4 class="font-bold text-xs sm:text-sm text-emerald-deep truncate">${escapeHtml(cName)}</h4>
-                <div class="text-[10px] text-charcoal-muted flex items-center gap-1">
-                  ${isOnline 
-                    ? '<span class="inline-flex items-center gap-1 text-emerald-700 font-bold"><span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse"></span>GPS: В сети</span>' 
-                    : '<span class="text-charcoal-muted">GPS: Офлайн</span>'}
-                  <span>• 🔋 ${battery}%</span>
-                  ${speed > 0 ? `<span>• 🚗 ${speed} км/ч</span>` : ''}
-                </div>
-              </div>
-            </div>
-            <div class="text-right shrink-0">
-              <div class="text-[10px] text-charcoal-muted">В кассе:</div>
-              <div class="font-mono font-bold text-xs text-emerald-deep">${courierCash.toLocaleString()} сум</div>
-            </div>
-          </div>
-
-          <!-- Workload counters -->
-          <div class="grid grid-cols-3 gap-1.5 pt-2 text-center text-[10px] font-bold">
-            <div class="p-1 rounded-lg bg-amber-50 text-amber-900 border border-amber-200">
-              <div>${myPickups.length}</div>
-              <div class="font-normal text-[9px] text-amber-700">Заборы</div>
-            </div>
-            <div class="p-1 rounded-lg bg-blue-50 text-blue-900 border border-blue-200">
-              <div>${myDeliveries.length}</div>
-              <div class="font-normal text-[9px] text-blue-700">Доставки</div>
-            </div>
-            <div class="p-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-200">
-              <div>${myDoneToday.length}</div>
-              <div class="font-normal text-[9px] text-emerald-700">Сдано</div>
-            </div>
-          </div>
-
-          <!-- Current task -->
-          ${currentTaskText}
-        </div>
-
-        <!-- Quick Actions -->
-        <div class="pt-2 flex items-center gap-1.5 border-t border-emerald-deep/10">
-          <button type="button" onclick="focusCourierOnDispMap(${lat}, ${lng}, '${escapeHtml(cName)}')" class="flex-1 py-1.5 px-2 bg-emerald-deep text-butter rounded-xl text-xs font-bold hover:bg-emerald-hover transition flex items-center justify-center gap-1 shadow-xs">
-            <i data-lucide="map-pin" class="w-3 h-3"></i>
-            <span>На карте</span>
-          </button>
-          <a href="tel:${escapeHtml(courier.phone)}" class="py-1.5 px-2.5 bg-white text-emerald-deep border border-emerald-deep/20 rounded-xl text-xs font-bold hover:bg-butter transition flex items-center gap-1 shadow-xs">
-            <i data-lucide="phone-call" class="w-3 h-3"></i>
-            <span>Позвонить</span>
-          </a>
-          <button type="button" onclick="openDispatcherBroadcastModal()" class="p-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold hover:bg-blue-100 transition" title="Отправить сообщение в группу">
-            <i data-lucide="send" class="w-3.5 h-3.5"></i>
-          </button>
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  container.innerHTML = cardsHtml;
-  if (badgeEl) badgeEl.textContent = `${onlineCount} экипаж${onlineCount === 1 ? '' : (onlineCount > 1 && onlineCount < 5 ? 'а' : 'ей')} в сети`;
-  if (window.lucide) lucide.createIcons();
-
-  if (isDispCourierMapExpanded) {
-    updateDispatcherCourierMapMarkers(locations);
-  }
-}
-
-function refreshDispatcherCourierMonitor() {
-  renderDispatcherCourierMonitor();
-  showToast('📍 Данные GPS и статус курьеров обновлены', 'info');
-}
-
-function toggleDispatcherCourierMap() {
-  const mapWrapper = document.getElementById('disp-courier-map-wrapper');
-  const toggleText = document.getElementById('disp-map-toggle-text');
-  if (!mapWrapper) return;
-
-  isDispCourierMapExpanded = !isDispCourierMapExpanded;
-  mapWrapper.classList.toggle('hidden', !isDispCourierMapExpanded);
-  if (toggleText) toggleText.textContent = isDispCourierMapExpanded ? '🔼 Скрыть карту' : '🗺️ Открыть карту';
-
-  if (isDispCourierMapExpanded) {
-    initDispatcherCourierMap();
-  }
-}
-
-function initDispatcherCourierMap() {
-  const mapDiv = document.getElementById('disp-courier-map');
-  if (!mapDiv || typeof L === 'undefined') return;
-
-  if (!dispCourierMap) {
-    dispCourierMap = L.map('disp-courier-map').setView([39.6542, 66.9597], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors'
-    }).addTo(dispCourierMap);
-  } else {
-    dispCourierMap.invalidateSize();
-  }
-
-  fetch('/api/gps/locations')
-    .then(r => r.json())
-    .then(locs => updateDispatcherCourierMapMarkers(locs))
-    .catch(() => updateDispatcherCourierMapMarkers([]));
-}
-
-function updateDispatcherCourierMapMarkers(locations = []) {
-  if (!dispCourierMap || typeof L === 'undefined') return;
-
-  dispCourierMarkers.forEach(m => dispCourierMap.removeLayer(m));
-  dispCourierMarkers = [];
-
-  // Plant marker
-  const plantIcon = L.divIcon({
-    className: 'plant-marker',
-    html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:bold; font-size:10px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,0.3);">🏭 ЦЕХ COSMO</div>`,
-    iconSize: [95, 26]
-  });
-  const pm = L.marker(WORKSHOP_COORDINATES, { icon: plantIcon }).addTo(dispCourierMap)
-    .bindPopup(`<b>🏭 Главный технологический цех COSMO CRM</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#04222B; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Проложить маршрут в Яндекс</a>`);
-  dispCourierMarkers.push(pm);
-
-  // Active orders markers
-  activeOrders.forEach(o => {
-    if (!['pickup', 'ready', 'delivery'].includes(o.stage)) return;
-    const coordInfo = getOrderCoordinatesWithFallback(o);
-    const isPickup = isPickupStage(o.stage);
-    const color = isPickup ? '#1D8B94' : '#2563EB';
-
-    const orderIcon = L.divIcon({
-      className: 'order-marker',
-      html: `<div style="background:${color}; color:#fff; padding:2px 6px; border-radius:8px; font-weight:bold; font-size:9px; border:1.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.3); white-space:nowrap;">${isPickup ? '📦' : '🚚'} #${o.id}</div>`,
-      iconSize: [60, 20]
-    });
-
-    const om = L.marker(coordInfo.coords, { icon: orderIcon }).addTo(dispCourierMap)
-      .bindPopup(`
-        <div style="font-size:11px; line-height:1.35; padding:2px;">
-          <b>${isPickup ? '📦 Забор' : '🚚 Доставка'} #${o.id}</b><br>
-          <b>Клиент:</b> ${escapeHtml(o.client_name)}<br>
-          <b>Адрес:</b> ${escapeHtml(o.client_address)} (${escapeHtml(o.district || 'Самарканд')})<br>
-          <b>Сумма:</b> ${(o.total_price || 0).toLocaleString()} сум<br>
-          <div style="margin-top:4px;">
-            <button onclick="printOrderReceipt('${o.id}')" style="background:#04222B; color:#fff; border:none; padding:3px 7px; border-radius:6px; font-size:10px; cursor:pointer;">🖨️ Чек</button>
-            <button onclick="callClient('${o.id}', '${escapeHtml(o.client_phone)}', '${escapeHtml(o.client_name)}')" style="background:#1D8B94; color:#fff; border:none; padding:3px 7px; border-radius:6px; font-size:10px; cursor:pointer;">📞 Звонок</button>
-          </div>
-        </div>
-      `);
-    dispCourierMarkers.push(om);
-  });
-
-  // Couriers live GPS markers
-  locations.forEach(loc => {
-    if (!loc || typeof loc.lat !== 'number' || isNaN(loc.lat)) return;
-    const displayName = (loc.courier_name || 'Курьер').split(' ')[0];
-    const courierIcon = L.divIcon({
-      className: 'courier-marker',
-      html: `<div style="background:#04222B; color:#98D8D0; padding:4px 8px; border-radius:12px; font-weight:800; font-size:11px; border:2px solid #98D8D0; box-shadow:0 0 10px rgba(29,139,148,0.8); white-space:nowrap;">🚚 ${escapeHtml(displayName)}</div>`,
-      iconSize: [85, 26]
-    });
-
-    const cm = L.marker([loc.lat, loc.lng], { icon: courierIcon }).addTo(dispCourierMap)
-      .bindPopup(`
-        <div style="font-size:12px; line-height:1.35;">
-          <b>🚚 Экипаж: ${escapeHtml(loc.courier_name || 'Курьер')}</b><br>
-          Скорость: ${loc.speed || 0} км/ч • Батарея: ${loc.battery || 100}%<br>
-          <span style="color:#059669; font-weight:bold;">🟢 В сети (GPS онлайн)</span>
-        </div>
-      `);
-    dispCourierMarkers.push(cm);
-  });
-}
-
-function focusCourierOnDispMap(lat, lng, name) {
-  if (!isDispCourierMapExpanded) {
-    toggleDispatcherCourierMap();
-  }
-  setTimeout(() => {
-    if (dispCourierMap) {
-      dispCourierMap.setView([lat, lng], 15);
-      showToast(`📍 Фокус на экипаже ${name}`, 'info');
-    }
-  }, 150);
-}
-
-// ================= DISPATCHER RECEIPT MODAL CONTROLLER =================
-
-function openDispatcherPrintModal(defaultOrderId = null) {
-  const modal = document.getElementById('modal-dispatcher-print-receipt');
-  const select = document.getElementById('disp-print-order-select');
-  if (!modal || !select) return;
-
-  if (activeOrders.length === 0) {
-    alert('Нет активных заказов для печати чека');
-    return;
-  }
-
-  select.innerHTML = activeOrders.map(o => {
-    const isSel = defaultOrderId && String(o.id) === String(defaultOrderId);
-    return `<option value="${escapeHtml(o.id)}" ${isSel ? 'selected' : ''}>#${escapeHtml(o.id)} - ${escapeHtml(o.client_name)} (${(o.total_price || 0).toLocaleString()} сум)</option>`;
-  }).join('');
-
-  previewDispatcherReceiptForSelectedOrder();
-  modal.classList.remove('hidden');
-  if (window.lucide) lucide.createIcons();
-}
-
-function previewDispatcherReceiptForSelectedOrder() {
-  const select = document.getElementById('disp-print-order-select');
-  const preview = document.getElementById('disp-print-order-preview');
-  if (!select || !preview) return;
-
-  const orderId = select.value;
-  const order = activeOrders.find(o => String(o.id) === String(orderId));
-  if (!order) {
-    preview.innerHTML = '<div class="text-charcoal-muted">Заказ не выбран</div>';
-    return;
-  }
-
-  const carpets = order.carpets ? (typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets) : [];
-  const carpetsCount = carpets.length > 0 ? carpets.length : 1;
-
-  preview.innerHTML = `
-    <div class="flex items-center justify-between border-b border-emerald-deep/10 pb-1.5">
-      <span class="font-bold text-emerald-deep font-mono text-sm">#${escapeHtml(order.id)}</span>
-      <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${order.paid ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">
-        ${order.paid ? '● Оплачен' : '○ К оплате: ' + ((order.total_price || 0) - (order.paid_amount || 0)).toLocaleString() + ' сум'}
-      </span>
-    </div>
-    <div class="text-xs"><b>Клиент:</b> ${escapeHtml(order.client_name)} (${escapeHtml(order.client_phone)})</div>
-    <div class="text-xs"><b>Адрес:</b> ${escapeHtml(order.client_address)} (${escapeHtml(order.district || 'Самарканд')})</div>
-    <div class="text-xs"><b>Изделия:</b> ${carpetsCount} шт • ${order.total_m2 || 0} м² • <b>Итого: ${(order.total_price || 0).toLocaleString()} сум</b></div>
-    <div class="text-[10px] text-charcoal-muted">Курьер: ${escapeHtml(order.courier_name || 'Не назначен')}</div>
-  `;
-}
-
-function executeDispatcherPrint() {
-  const select = document.getElementById('disp-print-order-select');
-  if (!select || !select.value) return;
-
-  const orderId = select.value;
-  closeModal('modal-dispatcher-print-receipt');
-  printOrderReceipt(orderId);
 }
 
 function openDispatcherBroadcastModal() {
@@ -6560,8 +6422,7 @@ async function sendQuickSmsToOrder(orderId) {
   const order = activeOrders.find(o => o.id === orderId);
   if (!order) return;
 
-  const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 95 032 33 30';
-  const defaultMsg = `Уважаемый(ая) ${order.client_name}! Ваш заказ #${order.id} на стирку ковров принят. COSMO CLEANING: ${companyPhone}`;
+  const defaultMsg = `Уважаемый(ая) ${order.client_name}! Ваш заказ #${order.id} на стирку ковров принят. BAROKOT CLEANING: +998 90 123-45-67`;
   const msg = prompt(`Отправка SMS клиенту (${order.client_phone}):`, defaultMsg);
   if (!msg) return;
 
@@ -6883,113 +6744,102 @@ function renderCourierPortalCards() {
 
     let assignmentBadge = '';
     if (isUnassigned) {
-      assignmentBadge = '<span class="bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold px-2 py-0.5 rounded-full">⚡ Свободный заказ (любой экипаж)</span>';
+      assignmentBadge = '<span class="bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold px-1.5 py-0.5 rounded-md truncate">⚡ Свободный</span>';
     } else if (isAssignedToMe) {
-      assignmentBadge = '<span class="bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-bold px-2 py-0.5 rounded-full">👤 Назначен вам</span>';
+      assignmentBadge = '<span class="bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-bold px-1.5 py-0.5 rounded-md truncate">👤 Вам</span>';
     } else {
-      assignmentBadge = `<span class="bg-gray-100 text-charcoal-muted border border-gray-300 text-[10px] font-bold px-2 py-0.5 rounded-full">🚚 ${escapeHtml(cleanedCourier)}</span>`;
+      assignmentBadge = `<span class="bg-gray-100 text-charcoal-muted border border-gray-300 text-[10px] font-bold px-1.5 py-0.5 rounded-md truncate">🚚 ${escapeHtml(cleanedCourier)}</span>`;
     }
 
     let actionButtonHtml = '';
     if (activeCourierPortalTab === 'pickups') {
       if (activeCourierPickupSubTab === 'in_car') {
         actionButtonHtml = `
-          <div class="w-full min-h-[46px] py-2.5 px-3 bg-amber-50 text-amber-900 border border-amber-200 rounded-xl text-xs font-bold flex items-center justify-between">
-            <span class="flex items-center gap-1.5">
-              ${getSvgIcon('package', 'w-4 h-4 text-amber-700')}
-              <span>Забрано • Направлено в цех на стирку</span>
+          <div class="w-full py-2 px-2.5 bg-amber-500/10 text-amber-900 dark:text-amber-200 border border-amber-500/30 rounded-xl text-xs font-bold flex items-center justify-between">
+            <span class="flex items-center gap-1.5 truncate">
+              ${getSvgIcon('package', 'w-4 h-4 text-amber-600 shrink-0')}
+              <span class="truncate">Забрано • В цех</span>
             </span>
-            <span class="text-[10px] bg-amber-200 text-amber-900 px-2 py-0.5 rounded-full font-mono">Ожидает замера</span>
+            <span class="text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded-md shrink-0 font-mono">Ожидает</span>
           </div>
         `;
       } else if (isUnassigned) {
         actionButtonHtml = `
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <button type="button" onclick="assignOrderToMe('${order.id}')" class="w-full min-h-[48px] py-3 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-md transition">
-              ${getSvgIcon('check-circle', 'w-4 h-4 text-white')}
-              <span>✋ Взять заявку в работу</span>
+          <div class="grid grid-cols-2 gap-1.5">
+            <button type="button" onclick="assignOrderToMe('${order.id}')" class="py-2.5 px-2 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1 shadow-xs transition">
+              ${getSvgIcon('check-circle', 'w-3.5 h-3.5 text-white shrink-0')}
+              <span>В работу</span>
             </button>
-            <button type="button" onclick="openPickupModal('${order.id}')" class="w-full min-h-[48px] py-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-sm hover:bg-emerald-hover active:scale-[0.99] transition">
-              ${getSvgIcon('package-check', 'w-4 h-4 text-butter')}
-              <span>📦 Сразу забрать в цех</span>
+            <button type="button" onclick="openPickupModal('${order.id}')" class="py-2.5 px-2 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-1 shadow-xs hover:bg-emerald-hover active:scale-[0.98] transition">
+              ${getSvgIcon('package-check', 'w-3.5 h-3.5 text-butter shrink-0')}
+              <span>Забрать</span>
             </button>
           </div>
         `;
       } else {
         actionButtonHtml = `
-          <div class="space-y-2">
-            <div class="w-full py-1.5 px-3 bg-emerald-100/80 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-bold flex items-center justify-between">
-              <span class="flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-emerald-600 animate-pulse"></span>
-                <span>Заявка у вас в работе</span>
-              </span>
-              <span class="text-[11px] text-emerald-800 font-semibold">Направляйтесь к клиенту</span>
-            </div>
-            <button type="button" onclick="openPickupModal('${order.id}')" class="w-full min-h-[48px] py-3 bg-emerald-deep text-butter rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-md hover:bg-emerald-hover active:scale-[0.99] transition">
-              ${getSvgIcon('package-check', 'w-5 h-5 text-butter')}
-              <span>📦 Забрать ковры у клиента (В цех)</span>
-            </button>
-          </div>
+          <button type="button" onclick="openPickupModal('${order.id}')" class="w-full min-h-[42px] py-2.5 px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm hover:bg-emerald-hover active:scale-[0.98] transition">
+            ${getSvgIcon('package-check', 'w-4 h-4 text-butter shrink-0')}
+            <span>📦 Забрать ковры (В цех)</span>
+          </button>
         `;
       }
     } else if (activeCourierPortalTab === 'deliveries') {
       if (order.stage === 'ready') {
         actionButtonHtml = `
-          <div class="space-y-2">
-            <button type="button" onclick="advanceCourierDelivery('${order.id}')" class="w-full min-h-[48px] py-3 bg-amber-600 hover:bg-amber-700 active:scale-[0.99] text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-md transition">
-              ${getSvgIcon('truck', 'w-5 h-5 text-white')}
-              <span>🚚 Взять заказ на доставку (В авто)</span>
+          <div class="space-y-1.5">
+            <button type="button" onclick="advanceCourierDelivery('${order.id}')" class="w-full min-h-[40px] py-2 px-2.5 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition">
+              ${getSvgIcon('truck', 'w-4 h-4 text-white shrink-0')}
+              <span>🚚 В авто (Взять на доставку)</span>
             </button>
-            <button type="button" onclick="openCourierDeliveryModal('${order.id}')" class="w-full min-h-[44px] py-2.5 bg-emerald-deep/10 hover:bg-emerald-deep/20 text-emerald-deep rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition">
-              ${getSvgIcon('dollar-sign', 'w-4 h-4 text-emerald-deep')}
-              <span>Сразу вручить клиенту & Принять оплату</span>
+            <button type="button" onclick="openCourierDeliveryModal('${order.id}')" class="w-full py-1.5 px-2 bg-emerald-deep/10 hover:bg-emerald-deep/20 text-emerald-deep rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition">
+              ${getSvgIcon('dollar-sign', 'w-3.5 h-3.5 text-emerald-deep shrink-0')}
+              <span>Сразу вручить & оплата</span>
             </button>
           </div>
         `;
       } else {
         actionButtonHtml = `
-          <div class="space-y-2">
-            <div class="w-full min-h-[40px] py-2 bg-blue-50 text-blue-800 border border-blue-200 rounded-xl text-xs font-bold text-center flex items-center justify-center gap-2">
-              ${getSvgIcon('truck', 'w-4 h-4 text-blue-700 animate-pulse')}
-              <span>Заказ в автомобиле (На доставке клиенту)</span>
-            </div>
-            <button type="button" onclick="openCourierDeliveryModal('${order.id}')" class="w-full min-h-[48px] py-3 bg-emerald-deep text-butter rounded-xl text-sm font-bold flex items-center justify-center gap-2 shadow-md hover:bg-emerald-hover active:scale-[0.99] transition">
-              ${getSvgIcon('dollar-sign', 'w-5 h-5 text-butter')}
-              <span>💵 Вручить клиенту & Принять оплату</span>
-            </button>
-          </div>
+          <button type="button" onclick="openCourierDeliveryModal('${order.id}')" class="w-full min-h-[42px] py-2.5 px-3 bg-emerald-deep text-butter rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-md hover:bg-emerald-hover active:scale-[0.98] transition">
+            ${getSvgIcon('dollar-sign', 'w-4 h-4 text-butter shrink-0')}
+            <span>💵 Вручить клиенту & Принять оплату</span>
+          </button>
         `;
       }
     } else {
       actionButtonHtml = `
-        <div class="w-full min-h-[44px] py-2.5 bg-emerald-100 text-emerald-800 rounded-xl text-xs font-bold text-center flex items-center justify-center gap-2">
-          ${getSvgIcon('check-circle-2', 'w-5 h-5 text-emerald-700')}
-          <span>Выполнен • Оплачено ${(order.paid_amount || order.total_price || 0).toLocaleString()} сум</span>
+        <div class="w-full py-2 px-2.5 bg-emerald-100 text-emerald-800 rounded-xl text-xs font-bold text-center flex items-center justify-center gap-1.5">
+          ${getSvgIcon('check-circle-2', 'w-4 h-4 text-emerald-700 shrink-0')}
+          <span>Оплачено ${(order.paid_amount || order.total_price || 0).toLocaleString()} сум</span>
         </div>
       `;
     }
 
     return `
-      <div class="theme-card border border-emerald-deep/20 rounded-2xl p-3 sm:p-4 shadow-sm space-y-2.5">
-        <!-- Top Row: ID, Badges & Stage -->
-        <div class="flex items-center justify-between gap-1.5">
-          <div class="flex items-center gap-1.5 overflow-hidden">
-            <span class="font-mono font-bold text-xs px-2.5 py-1 rounded-xl bg-emerald-deep text-butter shadow-xs cursor-pointer hover:opacity-90 transition shrink-0" onclick="navigateToOrder('${order.id}', 'yandex')" title="Построить маршрут в Яндекс Навигаторе">#${escapeHtml(order.id)}</span>
-            ${order.urgent ? '<span class="bg-rose-100 text-rose-800 text-[10px] font-bold px-2 py-0.5 rounded-full animate-pulse shrink-0">⚡ Срочно</span>' : ''}
-            ${hasExactGps ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 border border-emerald-300 shrink-0" title="Зафиксированы точные координаты дома">🎯 GPS</span>' : ''}
-          </div>
-          <div class="shrink-0">${getStageBadge(order.stage)}</div>
-        </div>
-
-        <!-- Order Body: Client & Address -->
-        <div class="space-y-1">
-          <!-- Row 2: Client name + Total price -->
-          <div class="flex items-center justify-between gap-2">
-            <h4 class="font-bold text-sm sm:text-base text-emerald-deep truncate cursor-pointer hover:underline" onclick="navigateToOrder('${order.id}', 'yandex')" title="Открыть маршрут">${escapeHtml(order.client_name)}</h4>
-            <span class="text-xs font-bold text-emerald-deep font-mono shrink-0">${(order.total_price || 0).toLocaleString()} сум</span>
+      <div class="theme-card border border-emerald-deep/20 rounded-2xl p-3.5 shadow-sm hover:shadow-md transition flex flex-col justify-between h-full space-y-2.5 relative group min-h-[300px]">
+        <!-- Top Info Block -->
+        <div class="space-y-2">
+          <!-- Row 1: ID, Urgency, Assignment, Stage Badge -->
+          <div class="flex items-center justify-between gap-1.5">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="font-mono font-bold text-xs px-2 py-0.5 rounded-lg bg-emerald-deep text-butter shadow-2xs shrink-0">#${escapeHtml(order.id)}</span>
+              ${order.urgent ? '<span class="bg-rose-500 text-white text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wider animate-pulse shrink-0">⚡ СРОЧНО</span>' : ''}
+              ${assignmentBadge}
+            </div>
+            <div class="shrink-0 text-right scale-95 origin-right">${getStageBadge(order.stage)}</div>
           </div>
 
-          <!-- Row 3: Address & Landmark -->
+          <!-- Row 2: Client Name & Total Sum -->
+          <div class="flex items-baseline justify-between gap-2 pt-0.5">
+            <h4 class="font-bold text-sm text-emerald-deep truncate" title="${escapeHtml(order.client_name)}">
+              ${escapeHtml(order.client_name)}
+            </h4>
+            <span class="font-mono font-extrabold text-sm text-emerald-deep shrink-0">
+              ${(order.total_price || 0).toLocaleString()} <span class="text-[10px] font-semibold text-charcoal-muted">сум</span>
+            </span>
+          </div>
+
+          <!-- Row 3: Address & District -->
           <div class="text-xs text-charcoal-muted flex items-start gap-1 leading-snug">
             ${getSvgIcon('map-pin', 'w-3.5 h-3.5 text-emerald-deep shrink-0 mt-0.5')}
             <span class="line-clamp-2">${escapeHtml(order.client_address)} <b class="text-emerald-deep font-semibold">(${escapeHtml(order.district || 'Самарканд')})</b></span>
@@ -7019,7 +6869,6 @@ function renderCourierPortalCards() {
               <div class="line-clamp-2 pl-3 text-charcoal font-medium text-[11px] leading-tight mt-0.5">${escapeHtml(order.notes)}</div>
             </div>
           ` : ''}
-
           <!-- Detailed Order Info Button -->
           <button type="button" onclick="openCourierOrderInfoModal('${order.id}')" class="w-full py-2 px-3 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 text-xs font-bold flex items-center justify-between transition active:scale-[0.98] shadow-2xs">
             <span class="flex items-center gap-1.5 truncate">
@@ -7089,12 +6938,12 @@ function initCourierPortalMap() {
   // База / Главный цех курьера
   const workshopIcon = L.divIcon({
     className: 'workshop-courier-pin',
-    html: `<div style="background-color: #04222B; color: #98D8D0; border: 2px solid white; border-radius: 12px; padding: 4px 8px; font-weight: bold; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); white-space: nowrap;">🏭 Цех Cosmo</div>`,
+    html: `<div style="background-color: #013E37; color: #FFEFB3; border: 2px solid white; border-radius: 12px; padding: 4px 8px; font-weight: bold; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); white-space: nowrap;">🏭 Цех Barakat</div>`,
     iconSize: [88, 26],
     iconAnchor: [44, 13]
   });
   const wsMarker = L.marker(WORKSHOP_COORDINATES, { icon: workshopIcon }).addTo(courierPortalMap)
-    .bindPopup(`<b>🏭 База / Главный цех Cosmo CRM</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#04222B; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Маршрут на базу в Яндекс</a>`);
+    .bindPopup(`<b>🏭 База / Главный цех Barakat</b><br>Самарканд (39.588503, 66.928409)<br><a href="https://yandex.com/maps/?rtext=~${WORKSHOP_COORDINATES[0]},${WORKSHOP_COORDINATES[1]}&rtt=auto" target="_blank" style="color:#013E37; font-weight:bold; text-decoration:underline; font-size:11px; margin-top:4px; display:inline-block;">🧭 Маршрут на базу в Яндекс</a>`);
   courierMapMarkers.push(wsMarker);
 
   const myOrders = activeOrders.filter(o => 
@@ -7109,11 +6958,11 @@ function initCourierPortalMap() {
     const isExactGps = coordInfo.isExact;
 
     const isPickup = order.stage === 'pickup';
-    const markerColor = isPickup ? '#10606F' : '#1D8B94';
+    const markerColor = isPickup ? '#D97706' : '#047857';
 
     const customIcon = L.divIcon({
       className: 'custom-courier-pin',
-      html: `<div style="background-color: ${markerColor}; color: white; border: ${isExactGps ? '3px solid #98D8D0' : '2px solid white'}; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12px; box-shadow: ${isExactGps ? '0 0 10px rgba(29,139,148,0.8)' : '0 4px 6px rgba(0,0,0,0.3)'};">${isPickup ? '📦' : '🚚'}</div>`,
+      html: `<div style="background-color: ${markerColor}; color: white; border: ${isExactGps ? '3px solid #FFEFB3' : '2px solid white'}; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12px; box-shadow: ${isExactGps ? '0 0 10px rgba(1,62,55,0.8)' : '0 4px 6px rgba(0,0,0,0.3)'};">${isPickup ? '📦' : '🚚'}</div>`,
       iconSize: [34, 34],
       iconAnchor: [17, 17]
     });
@@ -7129,7 +6978,7 @@ function initCourierPortalMap() {
     marker.bindPopup(`
       <div style="font-family: sans-serif; font-size: 12px; line-height: 1.4; padding: 5px; min-width: 220px;">
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:4px; margin-bottom:6px;">
-          <b style="color: #04222B; font-size: 13px;">Заказ #${order.id}</b>
+          <b style="color: #013E37; font-size: 13px;">Заказ #${order.id}</b>
           <span style="font-size:10px; font-weight:bold; padding:2px 6px; border-radius:8px; background:${markerColor}; color:#fff;">${isPickup ? '📦 Забор' : '🚚 Доставка'}</span>
         </div>
         <b>${escapeHtml(order.client_name)}</b><br>
@@ -7138,11 +6987,11 @@ function initCourierPortalMap() {
         ${order.notes ? `<div style="background:#FFFBEB; border:1px solid #FCD34D; color:#92400E; padding:4px; border-radius:6px; font-size:11px; margin:4px 0;">💬 <b>Диспетчер:</b> ${escapeHtml(order.notes)}</div>` : ''}
 
         <div style="margin:6px 0; font-size:11px;">
-          ${isExactGps ? `<span style="color:#1D8B94; font-weight:bold;">🎯 Точные GPS-координаты: ${lat.toFixed(5)}, ${lng.toFixed(5)}</span>` : '<span style="color:#b45309; font-weight:bold;">📍 Приблизительный район</span>'}
+          ${isExactGps ? `<span style="color:#047857; font-weight:bold;">🎯 Точные GPS-координаты: ${lat.toFixed(5)}, ${lng.toFixed(5)}</span>` : '<span style="color:#b45309; font-weight:bold;">📍 Приблизительный район</span>'}
         </div>
 
         <div style="margin-top: 8px; display:flex; flex-direction:column; gap:4px;">
-          <button type="button" onclick="callClient('${order.id}', '${escapeHtml(order.client_phone)}', '${escapeHtml(order.client_name)}')" style="background:#04222B; color:#98D8D0; border:none; padding:5px 8px; border-radius:6px; font-size:11px; font-weight:bold; cursor:pointer; text-align:center;">📞 Позвонить (${escapeHtml(order.client_phone)})</button>
+          <button type="button" onclick="callClient('${order.id}', '${escapeHtml(order.client_phone)}', '${escapeHtml(order.client_name)}')" style="background:#013E37; color:#FFEFB3; border:none; padding:5px 8px; border-radius:6px; font-size:11px; font-weight:bold; cursor:pointer; text-align:center;">📞 Позвонить (${escapeHtml(order.client_phone)})</button>
           <button type="button" onclick="navigateToOrder('${order.id}', 'yandex')" style="width:100%; background:#d97706; color:#fff; padding:7px 10px; border-radius:8px; border:none; font-size:11px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px;">🧭 Яндекс Навигатор</button>
           <button type="button" onclick="openLocationModal('${order.id}', false)" style="background:#f3f4f6; color:#374151; border:1px solid #d1d5db; padding:3px 6px; border-radius:6px; font-size:10px; font-weight:bold; cursor:pointer; margin-top:2px;">📍 ${isExactGps ? 'Изменить координаты' : '🎯 Зафиксировать точку GPS'}</button>
         </div>
@@ -7294,7 +7143,7 @@ function setWasherPortalSubTab(tab) {
       if (t === tab) {
         btn.className = 'py-2.5 px-4 min-h-[44px] shrink-0 whitespace-nowrap rounded-xl bg-emerald-deep text-butter shadow flex items-center gap-1.5 transition active:scale-[0.98]';
       } else {
-        btn.className = 'py-2.5 px-4 min-h-[44px] shrink-0 whitespace-nowrap rounded-xl bg-white dark:bg-[#052129] text-emerald-deep dark:text-butter border border-emerald-deep/20 dark:border-butter/20 shadow-sm flex items-center gap-1.5 transition hover:bg-butter-surface active:scale-[0.98]';
+        btn.className = 'py-2.5 px-4 min-h-[44px] shrink-0 whitespace-nowrap rounded-xl bg-white dark:bg-[#071410] text-emerald-deep dark:text-butter border border-emerald-deep/20 dark:border-butter/20 shadow-sm flex items-center gap-1.5 transition hover:bg-butter-surface active:scale-[0.98]';
       }
     }
   });
@@ -7410,12 +7259,8 @@ function renderWasherPortalCards() {
 
   try {
     container.innerHTML = targetList.map((order) => {
-      let carpets = [];
-      if (Array.isArray(order.carpets)) carpets = order.carpets;
-      else if (typeof order.carpets === 'string') {
-        try { carpets = JSON.parse(order.carpets); } catch (e) { carpets = []; }
-      }
-      const carpetsCount = carpets.reduce((sum, it) => sum + (parseInt(it.qty || it.count, 10) || 1), 0) || (carpets.length > 0 ? carpets.length : 1);
+      const carpets = expandOrderItems(order.carpets);
+      const carpetsCount = carpets.length > 0 ? carpets.length : 1;
       const orderNeedsMeasure = !order.total_m2 || order.total_m2 === 0;
       const washerPhotosCount = (order.photos && Array.isArray(order.photos)) ? order.photos.length : 0;
       const cleanPhone = String(order.client_phone || '').replace(/[^\d+]/g, '');
@@ -7440,14 +7285,14 @@ function renderWasherPortalCards() {
       `;
     } else if (orderNeedsMeasure) {
       stageActionBtn = `
-        <button type="button" onclick="openMeasureModalForOrder('${order.id}')" class="w-full min-h-[42px] py-2 px-3 bg-gradient-to-r from-[#10606F] to-[#1D8B94] hover:from-[#1D8B94] hover:to-[#4FB8B4] active:scale-[0.98] text-white rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 shadow-md" title="Внести замеры ковров">
+        <button type="button" onclick="openMeasureModalForOrder('${order.id}')" class="w-full min-h-[42px] py-2 px-3 bg-amber-500 hover:bg-amber-600 active:scale-[0.98] text-white rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 shadow-md" title="Внести замеры ковров">
           ${getSvgIcon('ruler', 'w-4 h-4 text-white')}
           <span>📐 Внести замеры</span>
         </button>
       `;
     } else {
       stageActionBtn = `
-        <button type="button" onclick="advanceWasherStage('${order.id}', 'ready')" class="w-full min-h-[42px] py-2 px-3 bg-gradient-to-r from-[#1D8B94] to-[#4FB8B4] text-[#04222B] rounded-xl text-xs font-black hover:opacity-95 active:scale-[0.98] transition flex items-center justify-center gap-1.5 shadow-md" title="Стирка и замеры завершены — передать курьеру на доставку">
+        <button type="button" onclick="advanceWasherStage('${order.id}', 'ready')" class="w-full min-h-[42px] py-2 px-3 bg-gradient-to-r from-emerald-600 to-emerald-700 text-white rounded-xl text-xs font-black hover:from-emerald-700 hover:to-emerald-800 active:scale-[0.98] transition flex items-center justify-center gap-1.5 shadow-md" title="Стирка и замеры завершены — передать курьеру на доставку">
           ${getSvgIcon('check-circle-2', 'w-4 h-4 text-butter')}
           <span>✅ Готов к доставке</span>
         </button>
@@ -7455,25 +7300,25 @@ function renderWasherPortalCards() {
     }
 
     return `
-      <div class="theme-card border ${isUrgent ? 'border-rose-500 shadow-rose-500/10 ring-1 ring-rose-400' : 'border-emerald-deep/20'} rounded-2xl p-3.5 shadow-md hover:shadow-lg transition flex flex-col justify-between space-y-2.5 text-xs bg-white dark:bg-[#052129]">
+      <div class="theme-card border ${isUrgent ? 'border-rose-500 shadow-rose-500/10 ring-1 ring-rose-400' : 'border-emerald-deep/20'} rounded-2xl p-3.5 shadow-md hover:shadow-lg transition flex flex-col justify-between space-y-2.5 text-xs bg-white dark:bg-[#071410]">
         <div class="space-y-2">
           <!-- Row 1: Status badge left, Order ID right (Cosmo CRM matching) -->
           <div class="flex items-center justify-between gap-2 border-b border-emerald-deep/10 dark:border-white/10 pb-2">
             <div class="flex items-center gap-1.5 flex-wrap">
               ${isUrgent ? '<span class="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-300 font-extrabold text-[10px] uppercase border border-rose-300 dark:border-rose-700">🔥 СРОЧНО</span>' : ''}
-              <span class="px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${isShopStage(order.stage) ? 'bg-[#E2F4F0] text-[#0A3D4A] border border-[#98D8D0] dark:bg-[#0A3D4A] dark:text-[#98D8D0]' : 'bg-[#1D8B94]/15 text-[#1D8B94] border border-[#1D8B94]/40 dark:bg-[#1D8B94]/30 dark:text-[#4FB8B4]'}">
+              <span class="px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${isShopStage(order.stage) ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300'}">
                 ${isShopStage(order.stage) ? '🧼 В стирке' : '✨ Готов'}
               </span>
               ${orderNeedsMeasure 
                 ? `<button type="button" onclick="openMeasureModalForOrder('${order.id}')" class="bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300 text-[10px] font-extrabold px-2 py-0.5 rounded-md border border-rose-300 animate-pulse hover:bg-rose-200" title="Нажмите, чтобы внести замеры">📐 Без замеров</button>` 
                 : `<button type="button" onclick="openMeasureModalForOrder('${order.id}')" class="bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 text-[10px] font-extrabold px-2 py-0.5 rounded-md border border-emerald-300 hover:bg-emerald-200" title="Нажмите, чтобы изменить замеры">✓ Замерен</button>`}
             </div>
-            <span class="font-mono font-black text-sm sm:text-base text-[#1D8B94] dark:text-[#98D8D0] shrink-0">№ ${escapeHtml(order.id)}</span>
+            <span class="font-mono font-black text-sm sm:text-base text-amber-600 dark:text-amber-400 shrink-0">№ ${escapeHtml(order.id)}</span>
           </div>
 
           <!-- Row 2: Courier & Date -->
           <div class="flex items-center gap-1.5 text-[11.5px] text-charcoal-muted dark:text-gray-400">
-            ${getSvgIcon('truck', 'w-3.5 h-3.5 text-[#1D8B94] shrink-0')}
+            ${getSvgIcon('truck', 'w-3.5 h-3.5 text-amber-500 shrink-0')}
             <span class="font-bold text-emerald-deep dark:text-gray-200 truncate">${escapeHtml(order.courier_name || 'Курьер не назначен')}</span>
             <span class="text-charcoal-muted/60">•</span>
             <span class="shrink-0">${formattedDate}</span>
@@ -7499,7 +7344,7 @@ function renderWasherPortalCards() {
 
           <!-- Row 5: Address -->
           <div class="flex items-start gap-1.5 text-xs text-charcoal-muted dark:text-gray-300">
-            ${getSvgIcon('home', 'w-3.5 h-3.5 text-[#10606F] shrink-0 mt-0.5')}
+            ${getSvgIcon('home', 'w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5')}
             <span class="line-clamp-2">${escapeHtml(order.client_address || 'Адрес не указан')}${order.landmark ? ` (${escapeHtml(order.landmark)})` : ''}</span>
           </div>
 
@@ -7508,12 +7353,12 @@ function renderWasherPortalCards() {
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-1.5">
                 <span class="text-charcoal-muted dark:text-gray-400 font-bold">🧺 Изделия: ${carpetsCount} шт</span>
-                <button type="button" onclick="openMeasureModalForOrder('${order.id}', true)" class="text-[10px] text-[#04222B] dark:text-[#98D8D0] bg-[#E2F4F0] dark:bg-[#0A3D4A] hover:bg-[#C8E6E2] border border-[#98D8D0] dark:border-[#4FB8B4]/40 px-2 py-0.5 rounded-md font-extrabold inline-flex items-center gap-0.5 shadow-2xs transition active:scale-95" title="Быстро добавить новое изделие в заказ">
+                <button type="button" onclick="openMeasureModalForOrder('${order.id}', true)" class="text-[10px] text-amber-900 dark:text-amber-200 bg-amber-100 dark:bg-amber-900/50 hover:bg-amber-200 border border-amber-300 dark:border-amber-700 px-2 py-0.5 rounded-md font-extrabold inline-flex items-center gap-0.5 shadow-2xs transition active:scale-95" title="Быстро добавить новое изделие в заказ">
                   <span>➕ Добавить</span>
                 </button>
               </div>
-              <span class="font-mono font-black ${orderNeedsMeasure ? 'text-[#10606F] dark:text-[#98D8D0]' : 'text-[#1D8B94] dark:text-[#98D8D0]'}">
-                ${orderNeedsMeasure ? '📏 Без замеров' : `✨ ${(order.total_m2 || 0)} м²`}
+              <span class="font-mono font-black ${orderNeedsMeasure ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400'}">
+                ${orderNeedsMeasure ? '⚠️ Без замеров' : `📐 ${(order.total_m2 || 0)} м²`}
               </span>
             </div>
 
@@ -7536,11 +7381,11 @@ function renderWasherPortalCards() {
                   const sumVal = Number(c.total) || (Number(c.price) ? Number(c.price) * qtyVal : 0);
                   areaText = sumVal > 0 ? `${sumVal.toLocaleString()} сум` : '—';
                 } else if (isMeter) {
-                  dimText = Number(c.length) > 0 ? `${c.length} пог.м` : '<span class="text-[#1D8B94] dark:text-[#98D8D0] font-semibold italic">требует замера</span>';
+                  dimText = Number(c.length) > 0 ? `${c.length} пог.м` : '<span class="text-amber-600 italic">требует замера</span>';
                   const sumVal = Number(c.total) || (Number(c.price) && Number(c.length) ? Math.round(Number(c.price) * Number(c.length)) : 0);
                   areaText = sumVal > 0 ? `${sumVal.toLocaleString()} сум` : '—';
                 } else {
-                  dimText = hasDimensions ? `${c.length}м × ${c.width}м` : '<span class="text-[#1D8B94] dark:text-[#98D8D0] font-semibold italic">требует замера</span>';
+                  dimText = hasDimensions ? `${c.length}м × ${c.width}м` : '<span class="text-amber-600 italic">требует замера</span>';
                   const areaVal = Number(c.area) || (hasDimensions ? +(c.length * c.width).toFixed(2) : 0);
                   areaText = areaVal > 0 ? `${areaVal} м²` : '—';
                 }
@@ -7551,21 +7396,21 @@ function renderWasherPortalCards() {
                     <span class="font-mono font-bold shrink-0 text-emerald-deep dark:text-butter">${areaText}</span>
                   </div>
                 `;
-              }).filter(Boolean).join('') : '<div class="text-[11px] text-[#1D8B94] dark:text-[#98D8D0] font-semibold italic">Ковры (требуется замер мастера)</div>'}
+              }).filter(Boolean).join('') : '<div class="text-[11px] text-amber-700 dark:text-amber-400 italic">Ковры (требуется замер мастера)</div>'}
             </div>
           </div>
 
           <!-- Row 7: Dispatcher / Comments -->
           <div class="flex items-center gap-1.5 text-[11.5px] text-charcoal-muted dark:text-gray-400 truncate">
-            ${getSvgIcon('headphones', 'w-3.5 h-3.5 text-[#1D8B94] shrink-0')}
+            ${getSvgIcon('headphones', 'w-3.5 h-3.5 text-sky-600 shrink-0')}
             <span class="truncate">${escapeHtml(order.dispatcher_name || 'Диспетчер')}</span>
             ${order.notes ? `<span class="text-amber-800 dark:text-amber-300 font-bold truncate">• 💬 ${escapeHtml(order.notes)}</span>` : ''}
           </div>
 
           <!-- Row 8: Price & Payment Status -->
           <div class="flex items-center justify-between bg-emerald-deep/5 dark:bg-white/5 px-2.5 py-1.5 rounded-xl text-xs border border-emerald-deep/10 dark:border-white/10">
-            <span class="font-mono font-black text-sm ${orderNeedsMeasure ? 'text-[#10606F] dark:text-[#98D8D0]' : 'text-[#04222B] dark:text-[#98D8D0]'}">
-              ${orderNeedsMeasure ? '📏 Ожидает замера' : `${(order.total_price || 0).toLocaleString()} сум`}
+            <span class="font-mono font-black text-sm ${orderNeedsMeasure ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-deep dark:text-butter'}">
+              ${orderNeedsMeasure ? '⚠️ Ожидает замера' : `${(order.total_price || 0).toLocaleString()} сум`}
             </span>
             <span class="text-[11px] font-extrabold ${isPaid ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}">
               ${isPaid ? '✅ Оплачено' : '🔴 Не оплачено'}
@@ -7576,15 +7421,15 @@ function renderWasherPortalCards() {
         <!-- Row 9: 4 Ergonomic Action Buttons (Cosmo CRM layout) -->
         <div class="border-t border-emerald-deep/10 dark:border-white/10 pt-2.5 space-y-2">
           <div class="grid grid-cols-3 gap-1.5">
-            <button type="button" onclick="openMeasureModalForOrder('${order.id}', true)" class="min-h-[40px] py-2 px-1.5 bg-[#E2F4F0] hover:bg-[#C8E6E2] dark:bg-[#0A3D4A] border border-[#98D8D0]/50 text-[#04222B] dark:text-[#E2F4F0] rounded-xl text-[11px] font-black active:scale-[0.98] transition flex items-center justify-center gap-1 shadow-2xs" title="Добавить новое изделие / ковер">
-              ${getSvgIcon('plus-circle', 'w-3.5 h-3.5 text-[#1D8B94] dark:text-[#98D8D0]')}
+            <button type="button" onclick="openMeasureModalForOrder('${order.id}', true)" class="min-h-[40px] py-2 px-1.5 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-900 dark:text-amber-200 rounded-xl text-[11px] font-black active:scale-[0.98] transition flex items-center justify-center gap-1 shadow-2xs" title="Добавить новое изделие / ковер">
+              ${getSvgIcon('plus-circle', 'w-3.5 h-3.5 text-amber-700 dark:text-amber-400')}
               <span>+ Изделие</span>
             </button>
             <button type="button" onclick="openMeasureModalForOrder('${order.id}')" class="min-h-[40px] py-2 px-1.5 bg-sky-50 dark:bg-sky-950/40 hover:bg-sky-100 border border-sky-300 dark:border-sky-700 text-sky-900 dark:text-sky-200 rounded-xl text-[11px] font-black active:scale-[0.98] transition flex items-center justify-center gap-1 shadow-2xs" title="Замер каждого ковра">
               ${getSvgIcon('ruler', 'w-3.5 h-3.5 text-sky-600 dark:text-sky-400')}
               <span>📏 Замер</span>
             </button>
-            <button type="button" onclick="openOrderPhotosModal('${order.id}')" class="min-h-[40px] py-2 px-1.5 bg-white dark:bg-[#052129] hover:bg-butter-surface border border-emerald-deep/20 text-emerald-deep dark:text-butter rounded-xl text-[11px] font-bold active:scale-[0.98] transition flex items-center justify-center gap-1 shadow-2xs" title="Фото ковров и дефектов">
+            <button type="button" onclick="openOrderPhotosModal('${order.id}')" class="min-h-[40px] py-2 px-1.5 bg-white dark:bg-[#071410] hover:bg-butter-surface border border-emerald-deep/20 text-emerald-deep dark:text-butter rounded-xl text-[11px] font-bold active:scale-[0.98] transition flex items-center justify-center gap-1 shadow-2xs" title="Фото ковров и дефектов">
               <span>📸</span>
               <span>Фото (${washerPhotosCount})</span>
             </button>
@@ -7768,60 +7613,7 @@ async function openMeasureModalForOrder(orderId, autoAddNew = false) {
   const container = document.getElementById('measure-items-list');
   container.innerHTML = '';
 
-  let rawCarpets = [];
-  if (order.carpets) {
-    try {
-      rawCarpets = typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets;
-    } catch (e) {
-      rawCarpets = [];
-    }
-  }
-
-  if (!Array.isArray(rawCarpets)) rawCarpets = [];
-
-  // Разворачиваем позиции, если у позиции указано количество > 1 (например, из приёма курьера "Ковер - 3 шт")
-  const expandedItems = [];
-  rawCarpets.forEach((c) => {
-    if (!c || typeof c !== 'object') return;
-    const count = parseInt(c.qty || c.count, 10) || 1;
-    const meta = resolveItemServiceMeta(c);
-    const isCarpet = meta.unit === 'м²';
-    const isMeter = meta.unit === 'метр' || meta.unit === 'м' || meta.unit === 'пог.м';
-    const hasDimensions = Number(c.length) > 0 && Number(c.width) > 0;
-    const baseName = c.name ? c.name.split(' (')[0].replace(/\s*#\d+$/, '') : (isCarpet ? 'Ковер' : (isMeter ? 'Курпача' : 'Изделие'));
-
-    if (count > 1 && isCarpet && !hasDimensions) {
-      for (let i = 0; i < count; i++) {
-        expandedItems.push({
-          ...c,
-          name: `${baseName} #${i + 1}`,
-          unit: 'м²',
-          qty: 1,
-          price: c.price || meta.price,
-          width: c.width || 2.0,
-          length: c.length || 3.0
-        });
-      }
-    } else if (count > 1 && isMeter && !c.length) {
-      for (let i = 0; i < count; i++) {
-        expandedItems.push({
-          ...c,
-          name: `${baseName} #${i + 1}`,
-          unit: 'метр',
-          qty: 1,
-          price: c.price || meta.price,
-          length: 2.0
-        });
-      }
-    } else {
-      expandedItems.push({
-        ...c,
-        unit: c.unit || meta.unit,
-        price: c.price || meta.price,
-        qty: count
-      });
-    }
-  });
+  const expandedItems = expandOrderItems(order.carpets);
 
   if (expandedItems.length === 0 && !autoAddNew) {
     const defaultSvc = (allServices && allServices[0]) || { name: 'Gilam Standart', unit: 'м²', price: 14000 };
@@ -7898,15 +7690,15 @@ function renderMeasureRowHtml({ num, name, unit, price, len, wid, qty, defects }
       <div class="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs items-end">
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Длина (м)</label>
-          <input type="text" inputmode="decimal" value="${len || 3.0}" class="measure-len w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9.,]/g, '').replace(',', '.'); recalculateMeasureTotals()">
+          <input type="text" inputmode="decimal" value="${len || 3.0}" class="measure-len w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9.,]/g, '').replace(',', '.'); recalculateMeasureTotals()">
         </div>
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Ширина (м)</label>
-          <input type="text" inputmode="decimal" value="${wid || 2.0}" class="measure-wid w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9.,]/g, '').replace(',', '.'); recalculateMeasureTotals()">
+          <input type="text" inputmode="decimal" value="${wid || 2.0}" class="measure-wid w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9.,]/g, '').replace(',', '.'); recalculateMeasureTotals()">
         </div>
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Ставка (сум/м²)</label>
-          <input type="text" inputmode="numeric" value="${price || 14000}" class="measure-tariff w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9]/g, ''); recalculateMeasureTotals()">
+          <input type="text" inputmode="numeric" value="${price || 14000}" class="measure-tariff w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9]/g, ''); recalculateMeasureTotals()">
           <input type="hidden" class="measure-qty" value="1">
         </div>
         <div class="bg-emerald-500/10 border border-emerald-500/20 p-2 rounded-xl text-center">
@@ -7921,13 +7713,13 @@ function renderMeasureRowHtml({ num, name, unit, price, len, wid, qty, defects }
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs items-end">
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Длина (погон. м)</label>
-          <input type="text" inputmode="decimal" value="${len || 2.0}" class="measure-len w-full p-2 rounded-xl border border-sky-400 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9.,]/g, '').replace(',', '.'); recalculateMeasureTotals()">
+          <input type="text" inputmode="decimal" value="${len || 2.0}" class="measure-len w-full p-2 rounded-xl border border-sky-400 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9.,]/g, '').replace(',', '.'); recalculateMeasureTotals()">
           <input type="hidden" class="measure-wid" value="0">
           <input type="hidden" class="measure-qty" value="1">
         </div>
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Ставка (сум/метр)</label>
-          <input type="text" inputmode="numeric" value="${price || 15000}" class="measure-tariff w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9]/g, ''); recalculateMeasureTotals()">
+          <input type="text" inputmode="numeric" value="${price || 15000}" class="measure-tariff w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9]/g, ''); recalculateMeasureTotals()">
         </div>
         <div class="bg-sky-500/10 border border-sky-500/20 p-2 rounded-xl text-center">
           <div class="measure-row-calc-area text-[10px] text-sky-700 font-bold">${len || 0} пог.м</div>
@@ -7941,13 +7733,13 @@ function renderMeasureRowHtml({ num, name, unit, price, len, wid, qty, defects }
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs items-end">
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Количество (${unit || 'шт'})</label>
-          <input type="number" step="1" min="1" max="99" value="${qty || 1}" class="measure-qty w-full p-2 rounded-xl border border-purple-400 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="recalculateMeasureTotals()">
+          <input type="number" step="1" min="1" max="99" value="${qty || 1}" class="measure-qty w-full p-2 rounded-xl border border-purple-400 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="recalculateMeasureTotals()">
           <input type="hidden" class="measure-len" value="0">
           <input type="hidden" class="measure-wid" value="0">
         </div>
         <div>
           <label class="text-[10px] text-charcoal-muted font-bold uppercase">Цена за 1 ${unit || 'шт'} (сум)</label>
-          <input type="text" inputmode="numeric" value="${price || 50000}" class="measure-tariff w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#052129] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9]/g, ''); recalculateMeasureTotals()">
+          <input type="text" inputmode="numeric" value="${price || 50000}" class="measure-tariff w-full p-2 rounded-xl border border-emerald-deep/20 font-mono font-bold bg-white dark:bg-[#071410] text-emerald-deep" oninput="this.value = this.value.replace(/[^0-9]/g, ''); recalculateMeasureTotals()">
         </div>
         <div class="bg-purple-500/10 border border-purple-500/20 p-2 rounded-xl text-center">
           <div class="measure-row-calc-area text-[10px] text-purple-700 font-bold">${qty || 1} ${unit || 'шт'}</div>
@@ -7962,7 +7754,7 @@ function renderMeasureRowHtml({ num, name, unit, price, len, wid, qty, defects }
       <div class="flex items-center gap-2 flex-1 min-w-0">
         <span class="text-base shrink-0">${typeIcon}</span>
         <span class="measure-pos-num font-mono font-bold text-xs text-amber-700 dark:text-amber-400 shrink-0">Позиция #${num}:</span>
-        <input type="text" value="${escapeHtml(name)}" class="measure-name font-bold text-xs text-emerald-deep bg-white dark:bg-[#052129] border border-emerald-deep/20 rounded-lg px-2 py-1 flex-1 min-w-[120px]" placeholder="Название изделия" title="Нажмите для редактирования названия">
+        <input type="text" value="${escapeHtml(name)}" class="measure-name font-bold text-xs text-emerald-deep bg-white dark:bg-[#071410] border border-emerald-deep/20 rounded-lg px-2 py-1 flex-1 min-w-[120px]" placeholder="Название изделия" title="Нажмите для редактирования названия">
         <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeClass} shrink-0">${badgeText}</span>
       </div>
       <button type="button" onclick="removeMeasureRow(this)" class="p-1 text-rose-600 hover:text-rose-800 hover:bg-rose-100/50 rounded-lg transition shrink-0" title="Удалить позицию">
@@ -7973,7 +7765,7 @@ function renderMeasureRowHtml({ num, name, unit, price, len, wid, qty, defects }
     <!-- Quick Service Switcher (Catalog Services) -->
     <div class="flex items-center gap-2 text-xs">
       <span class="text-[10px] text-charcoal-muted font-bold uppercase shrink-0">Услуга:</span>
-      <select class="measure-service-quick-select flex-1 p-1.5 text-xs font-semibold rounded-xl border border-emerald-deep/20 bg-butter-surface dark:bg-[#052129] text-emerald-deep" onchange="onMeasureServiceChange(this)">
+      <select class="measure-service-quick-select flex-1 p-1.5 text-xs font-semibold rounded-xl border border-emerald-deep/20 bg-butter-surface dark:bg-[#0b1714] text-emerald-deep" onchange="onMeasureServiceChange(this)">
         <option value="">(Выбрать из каталога услуг)</option>
         ${serviceOptions}
       </select>
@@ -7984,7 +7776,7 @@ function renderMeasureRowHtml({ num, name, unit, price, len, wid, qty, defects }
 
     <!-- Defect notes -->
     <div>
-      <input type="text" placeholder="Дефекты изделия (пятна, запах, заломы, дыры, потёртости)..." value="${escapeHtml(defects)}" class="measure-defects w-full p-2 text-xs rounded-xl border border-emerald-deep/15 placeholder:text-charcoal-muted/60 bg-white dark:bg-[#052129]">
+      <input type="text" placeholder="Дефекты изделия (пятна, запах, заломы, дыры, потёртости)..." value="${escapeHtml(defects)}" class="measure-defects w-full p-2 text-xs rounded-xl border border-emerald-deep/15 placeholder:text-charcoal-muted/60 bg-white dark:bg-[#071410]">
     </div>
   `;
 }
@@ -8071,7 +7863,7 @@ function addMeasureRow(preset = null, index = null, shouldScroll = true) {
   const qty = Math.max(1, parseInt(preset?.qty || preset?.count, 10) || 1);
 
   const div = document.createElement('div');
-  div.className = 'measure-item-row bg-white dark:bg-[#052129] p-3.5 rounded-2xl border border-emerald-deep/15 shadow-2xs space-y-2.5 transition';
+  div.className = 'measure-item-row bg-white dark:bg-[#0b1714] p-3.5 rounded-2xl border border-emerald-deep/15 shadow-2xs space-y-2.5 transition';
   div.setAttribute('data-unit', unit);
 
   div.innerHTML = renderMeasureRowHtml({
@@ -8299,142 +8091,231 @@ function printReceiptForCurrentOrder() {
 }
 
 function printOrderReceipt(orderId) {
-  // Проверка прав: вывод чека доступен только руководителю, диспетчеру и курьеру
+  // Печать товарного чека доступна исключительно Администратору и Диспетчеру
   const role = currentUser?.role;
-  if (role && !['admin', 'dispatcher', 'courier'].includes(role)) {
-    alert('Печать товарного чека доступна только руководителю, диспетчеру и курьеру.');
+  if (!role || !['admin', 'dispatcher'].includes(role)) {
+    alert('Печать товарного чека доступна исключительно Администратору и Диспетчеру.');
     return;
   }
 
-  const order = activeOrders.find(o => String(o.id) === String(orderId));
-  if (!order) return;
+  const order = (typeof activeOrders !== 'undefined' ? activeOrders : []).find(o => String(o.id) === String(orderId))
+    || (typeof allOrders !== 'undefined' ? allOrders : []).find(o => String(o.id) === String(orderId));
+  if (!order) {
+    alert(`Заказ #${orderId} не найден для печати чека.`);
+    return;
+  }
 
-  const totalSum = order.total_price || 0;
-  const paidSum = order.paid ? totalSum : (order.paid_amount || 0);
+  const totalSum = Number(order.total_price) || 0;
+  const paidSum = order.paid ? totalSum : (Number(order.paid_amount) || 0);
   const remaining = Math.max(0, totalSum - paidSum);
 
-  let items = [];
-  try {
-    items = order.carpets ? (typeof order.carpets === 'string' ? JSON.parse(order.carpets) : order.carpets) : [];
-  } catch (e) {
-    items = [];
-  }
+  const items = expandOrderItems(order.carpets);
   if (!Array.isArray(items) || items.length === 0) {
-    items = [{ name: 'Ковер', length: null, width: null, area: order.total_m2 || 0, price: 14000, total: totalSum }];
+    items.push({ name: 'Ковер (Стандарт)', length: 3.0, width: 2.0, area: order.total_m2 || 6.0, price: 14000, total: totalSum || 84000 });
   }
 
-  const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 95 032 33 30';
+  const companyName = (window.currentCompanySettings && window.currentCompanySettings.company_name) || 'COSMO CLEANING';
+  const companyPhone = (window.currentCompanySettings && window.currentCompanySettings.company_phone) || '+998 20 002 20 99';
   const courierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
-  const courierDisplay = `${escapeHtml(order.courier_name || 'Дамир')} (Тел: ${courierPhone})`;
+  const courierDisplay = order.courier_name ? `${escapeHtml(order.courier_name)} (${courierPhone})` : 'Не назначен';
+  const formattedDate = formatOrderDate(order.created_at || order.pickup_date || new Date().toISOString());
 
-  const html = `
-    <div style="font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 11px; line-height: 1.35; color: #000; width: 76mm; margin: 0 auto; padding: 4px 2px;">
-      <div style="text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px;">
-        <div style="font-size: 20px; font-weight: 900; letter-spacing: 1.5px;">COSMO</div>
-        <div style="font-size: 10px; font-weight: 800; margin-top: 1px;">ПРОФЕССИОНАЛЬНАЯ СТИРКА КОВРОВ</div>
-        <div style="font-size: 9px; margin-top: 2px;">Тел: ${companyPhone} • Самарканд</div>
+  const trackUrl = `${window.location.origin}/#track-${order.id}`;
+  let qrImgTag = '';
+  try {
+    const tempDiv = document.createElement('div');
+    if (typeof QRCode !== 'undefined') {
+      new QRCode(tempDiv, { text: trackUrl, width: 80, height: 80 });
+      const img = tempDiv.querySelector('img') || tempDiv.querySelector('canvas');
+      if (img) {
+        const src = img.tagName.toLowerCase() === 'canvas' ? img.toDataURL() : img.src;
+        qrImgTag = `<img src="${src}" width="80" height="80" style="display: block; margin: 4px auto;" />`;
+      }
+    }
+  } catch (e) {
+    console.warn('QR render notice:', e);
+  }
+  if (!qrImgTag) {
+    qrImgTag = `<div style="font-size: 9px; font-weight: bold; border: 1px dashed #000; padding: 4px; margin: 4px auto; width: 60mm; text-align: center;">${trackUrl}</div>`;
+  }
+
+  const receiptHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Чек #${escapeHtml(order.id)}</title>
+      <style>
+        @page { size: 80mm auto; margin: 0; }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          padding: 4mm 3mm;
+          background: #ffffff;
+          color: #000000;
+          font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
+          font-size: 11px;
+          line-height: 1.35;
+          width: 76mm;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+        .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 8px; }
+        .brand-title { font-size: 20px; font-weight: 900; letter-spacing: 1.5px; }
+        .brand-sub { font-size: 10px; font-weight: 800; margin-top: 1px; }
+        .brand-tel { font-size: 9px; margin-top: 2px; }
+        .doc-title { display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-bottom: 4px; }
+        .doc-date { font-size: 10px; margin-bottom: 6px; }
+        .info-box { border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 5px 0; margin-bottom: 8px; font-size: 10px; }
+        .items-title { font-weight: 900; font-size: 10px; margin-bottom: 4px; text-transform: uppercase; }
+        table { width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 8px; }
+        th { border-bottom: 1.5px solid #000; padding: 3px 0; }
+        td { padding: 4px 0; border-bottom: 1px dotted #888; }
+        .totals-box { border-top: 2px solid #000; padding-top: 5px; font-size: 11px; }
+        .total-row { display: flex; justify-content: space-between; margin-bottom: 2px; }
+        .total-final { display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-top: 4px; border-top: 1px dashed #000; padding-top: 3px; }
+        .sign-box { margin-top: 10px; padding-top: 6px; border-top: 1px dashed #000; font-size: 9px; display: flex; justify-content: space-between; }
+        .qr-box { text-align: center; margin-top: 8px; padding-top: 6px; border-top: 1px dashed #000; }
+        .footer { font-size: 8px; text-align: center; margin-top: 8px; color: #333; border-top: 1px solid #000; padding-top: 4px; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <div class="brand-title">${escapeHtml(companyName.toUpperCase())}</div>
+        <div class="brand-sub">ПРОФЕССИОНАЛЬНАЯ СТИРКА КОВРОВ И ТЕКСТИЛЯ</div>
+        <div class="brand-tel">Тел: ${escapeHtml(companyPhone)} • Самарканд</div>
       </div>
 
-      <div style="display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-bottom: 3px;">
-        <span>ТОВАРНЫЙ ЧЕК</span>
-        <span>#${order.id}</span>
+      <div class="doc-title">
+        <span>КВИТАНЦИЯ-НАКЛАДНАЯ</span>
+        <span>#${escapeHtml(order.id)}</span>
       </div>
-      <div style="font-size: 10px; margin-bottom: 6px;">Дата: ${order.pickup_date || order.created_at || new Date().toLocaleDateString('ru-RU')}</div>
+      <div class="doc-date">Дата: ${formattedDate}</div>
 
-      <div style="border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 5px 0; margin-bottom: 8px; font-size: 10px;">
-        <div><b>Клиент:</b> ${escapeHtml(order.client_name)}</div>
-        <div><b>Тел:</b> ${escapeHtml(order.client_phone)}</div>
-        <div><b>Адрес:</b> ${escapeHtml(order.client_address)} (${escapeHtml(order.district || 'Самарканд')})</div>
+      <div class="info-box">
+        <div><b>Клиент:</b> ${escapeHtml(order.client_name || 'Не указан')}</div>
+        <div><b>Тел:</b> ${escapeHtml(order.client_phone || '—')}</div>
+        <div><b>Адрес:</b> ${escapeHtml(order.client_address || 'Самарканд')} (${escapeHtml(order.district || 'Сиёб')})</div>
         ${order.landmark ? `<div><b>Ориентир:</b> ${escapeHtml(order.landmark)}</div>` : ''}
         <div><b>Курьер / Экипаж:</b> ${courierDisplay}</div>
+        ${order.notes ? `<div><b>Примечание:</b> ${escapeHtml(order.notes)}</div>` : ''}
       </div>
 
-      <div style="font-weight: 900; font-size: 10px; margin-bottom: 4px; text-transform: uppercase;">ИЗДЕЛИЯ И ЗАМЕРЫ:</div>
-      <table style="width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 8px;">
+      <div class="items-title">ИЗДЕЛИЯ И ЗАМЕРЫ (${items.length} шт):</div>
+      <table>
         <thead>
-          <tr style="border-bottom: 1.5px solid #000; font-weight: bold;">
-            <th style="text-align: left; padding: 3px 0;">№ Изделие / Размеры</th>
-            <th style="text-align: center; padding: 3px 0;">м² / шт</th>
-            <th style="text-align: right; padding: 3px 0;">Сумма</th>
+          <tr>
+            <th style="text-align: left;">№ Изделие / Размеры</th>
+            <th style="text-align: center;">м² / шт</th>
+            <th style="text-align: right;">Сумма</th>
           </tr>
         </thead>
         <tbody>
           ${items.map((it, idx) => {
             const length = it.length ? Number(it.length) : null;
             const width = it.width ? Number(it.width) : null;
-            const dims = (length && width) ? `${length.toFixed(2)} × ${width.toFixed(2)} м` : '';
-            const area = it.area || (length && width ? +(length * width).toFixed(2) : 0);
-            const sizeDisplay = it.unit === 'м²' || (!it.unit && area > 0) ? `${area} м²` : `${it.qty || 1} шт`;
-            const priceRate = it.price ? ` по ${Number(it.price).toLocaleString()} сум` : '';
-            const sumDisplay = (it.total || (it.price * (area || 1)) || 0).toLocaleString();
+            const unitStr = String(it.unit || 'м²').toLowerCase();
+            const isPiece = unitStr === 'шт' || unitStr === 'штук' || unitStr === 'dona';
+            const isMeter = unitStr === 'метр' || unitStr === 'м' || unitStr === 'пог.м';
+
+            let dims = '';
+            let sizeDisplay = '';
+            let sumDisplay = '';
+
+            if (isPiece) {
+              const qtyVal = it.qty || it.count || 1;
+              sizeDisplay = `${qtyVal} шт`;
+              const sumVal = Number(it.total) || (Number(it.price) ? Number(it.price) * qtyVal : 0);
+              sumDisplay = sumVal > 0 ? sumVal.toLocaleString() : '—';
+            } else if (isMeter) {
+              dims = length ? `${length} пог.м` : '';
+              sizeDisplay = length ? `${length} м` : 'замер';
+              const sumVal = Number(it.total) || (Number(it.price) && length ? Math.round(Number(it.price) * length) : 0);
+              sumDisplay = sumVal > 0 ? sumVal.toLocaleString() : '—';
+            } else {
+              dims = (length && width) ? `${length.toFixed(2)} × ${width.toFixed(2)} м` : '';
+              const area = it.area || (length && width ? +(length * width).toFixed(2) : 0);
+              sizeDisplay = area > 0 ? `${area} м²` : 'замер';
+              const sumVal = Number(it.total) || (Number(it.price) && area ? Math.round(Number(it.price) * area) : 0);
+              sumDisplay = sumVal > 0 ? sumVal.toLocaleString() : '—';
+            }
+
+            const priceRate = it.price ? ` (по ${Number(it.price).toLocaleString()} сум/${isPiece ? 'шт' : (isMeter ? 'м' : 'м²')})` : '';
+
             return `
-            <tr style="border-bottom: 1px dotted #ccc;">
-              <td style="padding: 4px 0;">
+            <tr>
+              <td>
                 <b>#${idx + 1}. ${escapeHtml(it.name || 'Ковер')}</b>
-                ${dims ? `<div style="font-size: 9px; color: #222;">Размер: ${dims}${priceRate}</div>` : (priceRate ? `<div style="font-size: 9px; color: #222;">Тариф:${priceRate}</div>` : '')}
-                ${it.defects ? `<div style="font-size: 8px; color: #555; font-style: italic;">Дефекты: ${escapeHtml(it.defects)}</div>` : ''}
+                ${dims ? `<div style="font-size: 9px; color: #333;">${dims}${priceRate}</div>` : (priceRate ? `<div style="font-size: 9px; color: #333;">Тариф:${priceRate}</div>` : '')}
+                ${it.defects ? `<div style="font-size: 8px; color: #c00; font-style: italic;">Дефекты: ${escapeHtml(it.defects)}</div>` : ''}
               </td>
-              <td style="text-align: center; padding: 4px 0; font-weight: bold;">${sizeDisplay}</td>
-              <td style="text-align: right; padding: 4px 0; font-weight: bold;">${sumDisplay} сум</td>
+              <td style="text-align: center; font-weight: bold;">${sizeDisplay}</td>
+              <td style="text-align: right; font-weight: bold;">${sumDisplay} сум</td>
             </tr>
           `;
           }).join('')}
         </tbody>
       </table>
 
-      <div style="border-top: 2px solid #000; padding-top: 5px; font-size: 11px;">
-        <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 11px;">
+      <div class="totals-box">
+        <div class="total-row">
           <span>Общая сумма заказа:</span>
-          <span>${totalSum.toLocaleString()} сум</span>
+          <span><b>${totalSum.toLocaleString()} сум</b></span>
         </div>
-        <div style="display: flex; justify-content: space-between; margin-top: 2px; font-size: 10px;">
+        <div class="total-row">
           <span>Внесено / Оплачено:</span>
           <span>${paidSum.toLocaleString()} сум</span>
         </div>
-        <div style="display: flex; justify-content: space-between; font-weight: 900; font-size: 13px; margin-top: 4px; border-top: 1px dashed #000; padding-top: 3px;">
+        <div class="total-final">
           <span>ИТОГО К ОПЛАТЕ:</span>
           <span>${remaining.toLocaleString()} сум</span>
         </div>
       </div>
 
-      <div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #000; font-size: 9px;">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-          <span>Сдал (Курьер): _________</span>
-          <span>Принял (Клиент): _________</span>
-        </div>
+      <div class="sign-box">
+        <span>Сдал (Курьер): _________</span>
+        <span>Принял (Клиент): _________</span>
       </div>
 
-      <div style="text-align: center; margin-top: 8px; padding-top: 6px; border-top: 1px dashed #000;">
+      <div class="qr-box">
         <div style="font-size: 9px; font-weight: bold;">ОНЛАЙН ТРЕКИНГ ЗАКАЗА:</div>
-        <div id="receipt-qr-${order.id}" style="display: flex; justify-content: center; margin: 4px 0;"></div>
-        <div style="font-size: 8px;">Наведите камеру смартфона для отслеживания</div>
+        ${qrImgTag}
+        <div style="font-size: 8px;">Наведите камеру смартфона для проверки статуса</div>
       </div>
 
-      <div style="font-size: 8px; text-align: center; margin-top: 8px; color: #222; border-top: 1px solid #000; padding-top: 4px;">
-        <div style="font-weight: 800;">Горячая линия: ${companyPhone} • Курьер: ${courierPhone}</div>
-        <div style="margin-top: 2px;">Спасибо за доверие! Стирка ковров на турецком оборудовании и сушка в камере.</div>
+      <div class="footer">
+        Спасибо за доверие! Стирка на турецком оборудовании, сушка в термокамере и антибактериальная обработка.
       </div>
-    </div>
+    </body>
+    </html>
   `;
 
-  const container = document.getElementById('printable-receipt');
-  container.innerHTML = html;
-  container.classList.remove('hidden');
-
-  // Render QR inside receipt
-  const qrContainer = document.getElementById(`receipt-qr-${order.id}`);
-  if (qrContainer && typeof QRCode !== 'undefined') {
-    const trackUrl = `${window.location.origin}/#track-${order.id}`;
-    new QRCode(qrContainer, {
-      text: trackUrl,
-      width: 70,
-      height: 70
-    });
+  let printFrame = document.getElementById('receipt-print-iframe');
+  if (!printFrame) {
+    printFrame = document.createElement('iframe');
+    printFrame.id = 'receipt-print-iframe';
+    printFrame.style.position = 'fixed';
+    printFrame.style.right = '0';
+    printFrame.style.bottom = '0';
+    printFrame.style.width = '0';
+    printFrame.style.height = '0';
+    printFrame.style.border = '0';
+    document.body.appendChild(printFrame);
   }
 
+  const frameDoc = printFrame.contentWindow.document;
+  frameDoc.open();
+  frameDoc.write(receiptHtml);
+  frameDoc.close();
+
   setTimeout(() => {
-    window.print();
-    container.classList.add('hidden');
+    try {
+      printFrame.contentWindow.focus();
+      printFrame.contentWindow.print();
+    } catch (e) {
+      console.warn('iframe print fallback:', e);
+      window.print();
+    }
   }, 250);
 }
 
@@ -8452,7 +8333,7 @@ function showQrForOrderId(orderId) {
       text: trackUrl,
       width: 180,
       height: 180,
-      colorDark: '#04222B',
+      colorDark: '#013E37',
       colorLight: '#ffffff'
     });
   }
@@ -8483,9 +8364,8 @@ async function showPublicTrackingScreen(orderId) {
     const order = await res.json();
 
     document.getElementById('track-client-name').textContent = order.client_name;
-    const courierPhone = (window.currentCompanySettings && window.currentCompanySettings.courier_phone) || '+998 20 002 20 99';
-    const courierName = order.courier_name || 'Дамир (Экипаж доставки)';
-    document.getElementById('track-courier-name').textContent = `${courierName} (${courierPhone})`;
+    document.getElementById('track-client-address').textContent = order.client_address + (order.landmark ? ` (${order.landmark})` : '');
+    document.getElementById('track-courier-name').textContent = order.courier_name || 'Экипаж BAROKOT';
     document.getElementById('track-total-price').textContent = (order.total_price || 0).toLocaleString() + ' сум';
 
     const payBadge = document.getElementById('track-payment-badge');
@@ -8595,7 +8475,7 @@ function setPublicRating(stars) {
 
 async function submitPublicReview() {
   const urlParams = new URLSearchParams(window.location.search);
-  const trackId = urlParams.get('track') || (window.location.hash.startsWith('#track-') ? window.location.hash.replace('#track-', '') : 'BRK-1048');
+  const trackId = urlParams.get('track') || (window.location.hash.startsWith('#track-') ? window.location.hash.replace('#track-', '') : 'CSM-1048');
   const reviewText = document.getElementById('public-review-text').value.trim();
 
   try {
@@ -8641,6 +8521,9 @@ async function handleClientSubmit(e) {
       closeModal('modal-client');
       await loadInitialData();
       alert('Клиент успешно зарегистрирован в базе!');
+    } else {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || 'Ошибка сохранения клиента');
     }
   } catch (err) {
     alert('Ошибка сохранения клиента');
@@ -8661,17 +8544,17 @@ function exportOrdersCSV() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `cosmo_orders_${Date.now()}.csv`;
+  a.download = `barokot_orders_${Date.now()}.csv`;
   a.click();
 }
 
 function getStageBadge(stage) {
   const norm = normalizeStage(stage);
   const map = {
-    pickup: '<span class="bg-[#E2F4F0] text-[#0A3D4A] border border-[#98D8D0] text-[10px] font-bold px-2 py-0.5 rounded-full">1. К забору</span>',
-    in_shop: '<span class="bg-[#C8E6E2] text-[#04222B] border border-[#4FB8B4] text-[10px] font-bold px-2 py-0.5 rounded-full">2. В цеху</span>',
-    ready: '<span class="bg-[#98D8D0]/40 text-[#04222B] border border-[#1D8B94] text-[10px] font-bold px-2 py-0.5 rounded-full">3. Готов к доставке</span>',
-    delivered: '<span class="bg-[#1D8B94] text-white border border-[#10606F] text-[10px] font-bold px-2 py-0.5 rounded-full">4. Доставлен</span>',
+    pickup: '<span class="bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold px-2 py-0.5 rounded-full">1. К забору</span>',
+    in_shop: '<span class="bg-blue-100 text-blue-900 border border-blue-300 text-[10px] font-bold px-2 py-0.5 rounded-full">2. В цеху</span>',
+    ready: '<span class="bg-teal-100 text-teal-900 border border-teal-300 text-[10px] font-bold px-2 py-0.5 rounded-full">3. Готов к доставке</span>',
+    delivered: '<span class="bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-bold px-2 py-0.5 rounded-full">4. Доставлен</span>',
     cancelled: '<span class="bg-rose-100 text-rose-800 border border-rose-300 text-[10px] font-bold px-2 py-0.5 rounded-full">Отменен</span>'
   };
   return map[norm] || map.pickup;
@@ -8974,7 +8857,7 @@ function renderAnalytics(period = currentAnalyticsPeriod) {
               <span class="font-mono text-charcoal font-semibold">${s.sum.toLocaleString()} сум</span>
             </div>
             <div class="w-full h-1.5 bg-emerald-deep/10 rounded-full overflow-hidden flex">
-              <div class="bg-gradient-to-r from-[#10606F] to-[#1D8B94] h-full rounded-full" style="width: ${Math.max(4, share)}%;"></div>
+              <div class="bg-amber-500 h-full rounded-full" style="width: ${Math.max(4, share)}%;"></div>
             </div>
             <div class="text-[10px] text-charcoal-muted flex justify-between">
               <span>${s.count} шт.</span>
@@ -9174,7 +9057,7 @@ function exportArchiveCSV() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `cosmo_archive_${Date.now()}.csv`;
+  a.download = `barokot_archive_${Date.now()}.csv`;
   a.click();
 }
 
@@ -9830,6 +9713,18 @@ async function openOrderPhotosModal(orderId) {
   const modal = document.getElementById('modal-order-photos');
   if (modal) modal.classList.remove('hidden');
   if (window.lucide) lucide.createIcons();
+
+  // Load full resolution photos on demand for the modal view
+  try {
+    const pRes = await fetch(`/api/orders/${orderId}/photos`);
+    if (pRes.ok) {
+      const pData = await pRes.json();
+      if (pData && Array.isArray(pData.photos)) {
+        if (order) order.photos = pData.photos;
+        renderOrderPhotosGallery(pData.photos);
+      }
+    }
+  } catch (err) {}
 }
 
 function renderOrderPhotosGallery(photos = []) {
@@ -10023,6 +9918,58 @@ window.exportOrdersCSV = exportOrdersCSV;
 window.triggerLiquidRipple = triggerLiquidRipple;
 window.updateLiquidNavIndicator = updateLiquidNavIndicator;
 window.renderMobileBottomNav = renderMobileBottomNav;
+window.moveOrderToStage = moveOrderToStage;
+window.handleKanbanDragStart = handleKanbanDragStart;
+window.handleKanbanDragEnd = handleKanbanDragEnd;
+window.handleKanbanDragOver = handleKanbanDragOver;
+window.handleKanbanDragLeave = handleKanbanDragLeave;
+window.handleKanbanDrop = handleKanbanDrop;
+
+// Core App, Auth & Modal Bindings
+window.logout = logout;
+window.openNewOrderModal = openNewOrderModal;
+window.openStreetOrderModal = openStreetOrderModal;
+window.openEditOrderModal = openEditOrderModal;
+window.closeModal = closeModal;
+window.applyRoleWindow = applyRoleWindow;
+window.switchTab = switchTab;
+window.toggleSidebar = toggleSidebar;
+window.openMobileSidebar = openMobileSidebar;
+window.closeMobileSidebar = closeMobileSidebar;
+window.toggleSidebarCollapse = toggleSidebarCollapse;
+window.enterPin = enterPin;
+window.deletePin = deletePin;
+window.clearPin = clearPin;
+window.verifyPin = verifyPin;
+window.quickLogin = quickLogin;
+window.setTheme = setTheme;
+window.toggleTheme = toggleTheme;
+window.addOrderFormItemRow = addOrderFormItemRow;
+window.handleOrderFormSubmit = handleOrderFormSubmit;
+window.openNewClientModal = openNewClientModal;
+window.handleClientSubmit = handleClientSubmit;
+window.openPayDebtModal = openPayDebtModal;
+window.advanceOrderStage = advanceOrderStage;
+window.openMeasureModalForOrder = openMeasureModalForOrder;
+window.openNavigationModal = openNavigationModal;
+window.openCallHistoryModal = openCallHistoryModal;
+window.callClient = callClient;
+window.toggleCourierLiveGps = toggleCourierLiveGps;
+window.openCourierDeliveryModal = openCourierDeliveryModal;
+window.setCourierPortalSubTab = setCourierPortalSubTab;
+window.setWasherPortalSubTab = setWasherPortalSubTab;
+window.renderOrdersTable = renderOrdersTable;
+window.renderKanban = renderKanban;
+window.renderDashboard = renderDashboard;
+window.renderClients = renderClients;
+window.renderFinance = renderFinance;
+window.renderTariffs = renderTariffs;
+window.renderStaff = renderStaff;
+window.renderDispatcherPortal = renderDispatcherPortal;
+window.renderCourierPortal = renderCourierPortal;
+window.renderWasherPortal = renderWasherPortal;
+window.printHistoricalZReport = printHistoricalZReport;
+window.printHistoricalZReportByIndex = printHistoricalZReportByIndex;
 window.openCourierShiftModal = openCourierShiftModal;
 window.reloadModalShiftData = reloadModalShiftData;
 window.recalcModalShiftNetCash = recalcModalShiftNetCash;
@@ -10034,5 +9981,3 @@ window.openIncomingCallActiveOrder = openIncomingCallActiveOrder;
 window.copyIncomingCallPhone = copyIncomingCallPhone;
 window.simulateIncomingCallTest = simulateIncomingCallTest;
 window.pollIncomingTelephonyCall = pollIncomingTelephonyCall;
-
-
